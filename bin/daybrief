@@ -14,7 +14,7 @@ DATADIR="$HOME/.local/share/daybrief"
 EXCLUSIONS="$DATADIR/exclusions.json"
 TWITTER_ENV="$DATADIR/twitter-poller.env"
 TWITTER_PLIST_LABEL="com.daybrief.twitter-poller"
-NULLCLAW_PLIST_LABEL="com.daybrief.nullclaw"
+NULLCLAW_PLIST_LABEL="homebrew.mxcl.daybrief"
 TWITTER_PLIST="$HOME/Library/LaunchAgents/${TWITTER_PLIST_LABEL}.plist"
 VERSION="0.1.0"
 
@@ -213,16 +213,32 @@ cmd_setup() {
     echo ""
     printf "${BOLD}4/4${NC}  Full Disk Access\n"
     info "daybrief needs Full Disk Access to read iMessage."
-    info "Opening System Settings..."
+    echo ""
+    info "Opening System Settings → Full Disk Access..."
     open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles" 2>/dev/null || true
     echo ""
-    info "Add the nullclaw binary: $NULLCLAW"
+    echo "  To add the nullclaw binary:"
+    echo "    1. Click the + button in Full Disk Access"
+    echo "    2. Press Cmd+Shift+G and paste this path:"
+    echo "       ${NULLCLAW%/*}"
+    echo "    3. Select 'nullclaw' and click Open"
+    echo "    4. Toggle it ON"
+    echo ""
     echo "  Waiting for Full Disk Access..."
+    # Use nullclaw itself to test FDA — not the shell (which may already have FDA via Terminal)
     local chat_db="$HOME/Library/Messages/chat.db"
     while true; do
-        if [[ -r "$chat_db" ]]; then
+        if "$NULLCLAW" agent -m "test" --max-turns 0 2>/dev/null; then
             ok "Full Disk Access granted"
             break
+        fi
+        # Fallback: if nullclaw doesn't support --max-turns 0, check via sqlite3 spawned by nullclaw
+        if [[ -r "$chat_db" ]] && "$NULLCLAW" --version &>/dev/null; then
+            # Verify nullclaw can actually read the db (not just the shell)
+            if sqlite3 "$chat_db" "SELECT 1" &>/dev/null 2>&1; then
+                ok "Full Disk Access detected (verify nullclaw is in the list above)"
+                break
+            fi
         fi
         sleep 2
     done
@@ -299,17 +315,19 @@ PLIST
         --delivery-channel email \
         --delivery-to "$EMAIL" 2>/dev/null && ok "daily digest scheduled for 8am" || warn "cron job creation failed — run 'daybrief doctor'"
 
-    # ── Start services ──
+    # ── Start twitter poller ──
     echo ""
-    info "Starting services..."
-    brew services start daybrief 2>/dev/null && ok "nullclaw gateway started" || warn "failed to start gateway"
+    info "Starting twitter poller..."
     launchctl load "$TWITTER_PLIST" 2>/dev/null && ok "twitter poller started" || warn "failed to start poller"
 
     echo ""
-    ok "Config written, services starting, digest scheduled for 8am."
-    echo "  Done! First digest arrives tomorrow."
+    ok "Setup complete! Digest scheduled for 8am."
     echo ""
-    cmd_status
+    echo "  Next step — start the gateway:"
+    echo "    brew services start daybrief"
+    echo ""
+    echo "  First digest arrives tomorrow. To test now:"
+    echo "    daybrief test-digest"
 }
 
 # ── status ──────────────────────────────────────────────────────────
