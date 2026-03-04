@@ -375,8 +375,8 @@ cmd_setup() {
 
     # Copy workspace files
     mkdir -p "$WORKSPACE_DIR"
-    if [[ -f "$LIBEXEC/../config/workspace/INTEGRATIONS.md" ]]; then
-        cp "$LIBEXEC/../config/workspace/INTEGRATIONS.md" "$WORKSPACE_DIR/"
+    if [[ -f "$LIBEXEC/workspace/INTEGRATIONS.md" ]]; then
+        cp "$LIBEXEC/workspace/INTEGRATIONS.md" "$WORKSPACE_DIR/"
         ok "copied INTEGRATIONS.md to workspace"
     fi
 
@@ -814,8 +814,8 @@ else:
 _regenerate_digest_job() {
     # Ensure workspace files exist
     mkdir -p "$WORKSPACE_DIR"
-    if [[ -f "$LIBEXEC/../config/workspace/INTEGRATIONS.md" ]] && [[ ! -f "$WORKSPACE_DIR/INTEGRATIONS.md" ]]; then
-        cp "$LIBEXEC/../config/workspace/INTEGRATIONS.md" "$WORKSPACE_DIR/"
+    if [[ -f "$LIBEXEC/workspace/INTEGRATIONS.md" ]] && [[ ! -f "$WORKSPACE_DIR/INTEGRATIONS.md" ]]; then
+        cp "$LIBEXEC/workspace/INTEGRATIONS.md" "$WORKSPACE_DIR/"
     fi
 
     local job_id
