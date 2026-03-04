@@ -27,7 +27,15 @@
       "smtp_password": "${SMTP_PASSWORD}",
       "from_address": "${EMAIL_FROM}",
       "allow_from": ["*"]
-    }
+    },
+    "slack": [{
+      "bot_token": "${SLACK_BOT_TOKEN}",
+      "channel_id": "${SLACK_CHANNEL_ID}",
+      "mode": "http"
+    }],
+    "twitter": [{
+      "bearer_token": "${TWITTER_BEARER_TOKEN}"
+    }]
   },
   "memory": {
     "backend": "sqlite",

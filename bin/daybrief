@@ -12,10 +12,8 @@ ABDB="@@ABDB@@"
 CONFIG="$HOME/.nullclaw/config.json"
 DATADIR="$HOME/.local/share/daybrief"
 EXCLUSIONS="$DATADIR/exclusions.json"
-TWITTER_ENV="$DATADIR/twitter-poller.env"
-TWITTER_PLIST_LABEL="com.daybrief.twitter-poller"
 NULLCLAW_PLIST_LABEL="homebrew.mxcl.daybrief"
-TWITTER_PLIST="$HOME/Library/LaunchAgents/${TWITTER_PLIST_LABEL}.plist"
+WORKSPACE_DIR="$HOME/.nullclaw/workspace"
 VERSION="0.1.0"
 
 # ── Colors ──────────────────────────────────────────────────────────
@@ -63,6 +61,7 @@ ensure_exclusions() {
 }
 
 digest_prompt() {
+    local format="${1:-html}"
     local exclude_text=""
     if [[ -f "$EXCLUSIONS" ]]; then
         local im_list tw_list
@@ -72,7 +71,15 @@ digest_prompt() {
             exclude_text=" Exclude messages from: ${im_list}${im_list:+, }${tw_list}."
         fi
     fi
-    echo "Use the message_history tool with hours_back=24 to get all iMessages from the last 24 hours. Then use memory_recall with query \"twitter DM\" to get recent Twitter DMs. Group messages by contact/sender. For each conversation: summarize the key points in 1-2 sentences. Then create sections: Key Conversations (sorted by importance), Action Items (anything requiring follow-up), and Interesting Signals (notable patterns or opportunities). If no messages found, say so. If more than 100 messages, focus on the top 20 most substantive conversations. Format as clean HTML email.${exclude_text}"
+
+    local format_instruction
+    if [[ "$format" == "slack" ]]; then
+        format_instruction="Format as Slack-compatible Markdown using *bold*, bullet points, and section headers."
+    else
+        format_instruction="Format as clean HTML email."
+    fi
+
+    echo "Use the message_history tool with hours_back=24 to get all iMessages from the last 24 hours. Then use memory_recall with query \"twitter DM\" to get recent Twitter DMs. Group messages by contact/sender. For each conversation: summarize the key points in 1-2 sentences. Then create sections: Key Conversations (sorted by importance), Action Items (anything requiring follow-up), and Interesting Signals (notable patterns or opportunities). If no messages found, say so. If more than 100 messages, focus on the top 20 most substantive conversations. ${format_instruction}${exclude_text}"
 }
 
 get_digest_job_id() {
@@ -99,14 +106,14 @@ ${BOLD}COMMANDS${NC}
     setup                  Configure daybrief (one-time wizard)
     status                 Show service health
     doctor                 Diagnose common issues
-    logs [nullclaw|twitter] Tail service logs
+    logs                   Tail service logs
     config                 Edit config in \$EDITOR
     config show            Print config (secrets redacted)
     test-digest            Trigger a digest right now
     exclude <contact>      Exclude a contact from digest
     include <contact>      Remove contact from exclusion list
     exclude --list         Show all excluded contacts
-    reauth-twitter         Re-authenticate Twitter (clears cookies)
+    reauth-twitter         Re-authenticate Twitter API token
     remote enable <key>    Enable remote access via Tailscale
     remote disable         Disable remote access
     remote status          Show Tailscale status
@@ -133,8 +140,8 @@ cmd_setup() {
     ensure_datadir
     mkdir -p "$HOME/.nullclaw"
 
-    # ── 1/4 Anthropic API key ──
-    printf "${BOLD}1/4${NC}  Anthropic API key\n"
+    # ── 1/5 Anthropic API key ──
+    printf "${BOLD}1/5${NC}  Anthropic API key\n"
     prompt_secret ANTHROPIC_API_KEY "  API key (sk-ant-...)"
     printf "  Validating... "
     local http_code
@@ -148,70 +155,180 @@ cmd_setup() {
         warn "API returned HTTP $http_code (may still work)"
     fi
 
-    # ── 2/4 Email ──
+    # ── 2/5 Digest delivery ──
     echo ""
-    printf "${BOLD}2/4${NC}  Email delivery\n"
-    echo "  Which email provider?"
-    echo "    1) Gmail"
-    echo "    2) iCloud"
-    echo "    3) Outlook"
-    echo "    4) Other"
+    printf "${BOLD}2/5${NC}  Digest delivery\n"
+    echo "    1) Email"
+    echo "    2) Slack"
     printf "  Choice [1]: "
-    read -r provider_choice
-    provider_choice="${provider_choice:-1}"
+    read -r delivery_choice
+    delivery_choice="${delivery_choice:-1}"
 
-    local smtp_host smtp_port app_pw_url
-    case "$provider_choice" in
-        1) smtp_host="smtp.gmail.com"; smtp_port="587"; app_pw_url="https://myaccount.google.com/apppasswords" ;;
-        2) smtp_host="smtp.mail.me.com"; smtp_port="587"; app_pw_url="https://appleid.apple.com/account/manage" ;;
-        3) smtp_host="smtp.office365.com"; smtp_port="587"; app_pw_url="" ;;
-        4)
-            prompt_required smtp_host "  SMTP host"
-            prompt_required smtp_port "  SMTP port"
-            app_pw_url=""
+    local DELIVERY_CHANNEL="email"
+    local DELIVERY_TO=""
+    local SLACK_BOT_TOKEN=""
+    local SLACK_CHANNEL_ID=""
+    local smtp_host="" smtp_port="" EMAIL="" APP_PASSWORD=""
+
+    case "$delivery_choice" in
+        2)
+            DELIVERY_CHANNEL="slack"
+            echo ""
+            info "Create a Slack app at https://api.slack.com/apps"
+            info "Required scopes: chat:write"
+            info "Install to workspace, then paste the bot token below."
+            echo ""
+            prompt_secret SLACK_BOT_TOKEN "  Bot token (xoxb-...)"
+
+            # Validate token
+            printf "  Validating... "
+            local slack_resp
+            slack_resp=$(curl -s "https://slack.com/api/auth.test" \
+                -H "Authorization: Bearer $SLACK_BOT_TOKEN" 2>/dev/null || echo '{"ok":false}')
+            if echo "$slack_resp" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get('ok') else 1)" 2>/dev/null; then
+                ok "Slack token valid"
+            else
+                warn "Slack token validation failed (setup will continue)"
+            fi
+
+            prompt_required SLACK_CHANNEL_ID "  Channel ID (C...)"
+            DELIVERY_TO="$SLACK_CHANNEL_ID"
             ;;
-        *) smtp_host="smtp.gmail.com"; smtp_port="587"; app_pw_url="https://myaccount.google.com/apppasswords" ;;
+        *)
+            DELIVERY_CHANNEL="email"
+            echo ""
+            echo "  Which email provider?"
+            echo "    1) Gmail"
+            echo "    2) iCloud"
+            echo "    3) Outlook"
+            echo "    4) Other"
+            printf "  Choice [1]: "
+            read -r provider_choice
+            provider_choice="${provider_choice:-1}"
+
+            local app_pw_url
+            case "$provider_choice" in
+                1) smtp_host="smtp.gmail.com"; smtp_port="587"; app_pw_url="https://myaccount.google.com/apppasswords" ;;
+                2) smtp_host="smtp.mail.me.com"; smtp_port="587"; app_pw_url="https://appleid.apple.com/account/manage" ;;
+                3) smtp_host="smtp.office365.com"; smtp_port="587"; app_pw_url="" ;;
+                4)
+                    prompt_required smtp_host "  SMTP host"
+                    prompt_required smtp_port "  SMTP port"
+                    app_pw_url=""
+                    ;;
+                *) smtp_host="smtp.gmail.com"; smtp_port="587"; app_pw_url="https://myaccount.google.com/apppasswords" ;;
+            esac
+
+            prompt_required EMAIL "  Email address"
+
+            if [[ -n "$app_pw_url" ]]; then
+                echo ""
+                info "You need an app password (not your regular password)."
+                info "Steps:"
+                echo "    1. Go to $app_pw_url"
+                echo "    2. Create a new app password for 'daybrief'"
+                echo "    3. Paste it below"
+                echo ""
+                open "$app_pw_url" 2>/dev/null || true
+            fi
+
+            prompt_secret APP_PASSWORD "  App password"
+
+            # Test email
+            printf "  Sending test email... "
+            if echo "Subject: daybrief test\nFrom: $EMAIL\nTo: $EMAIL\n\nThis is a test email from daybrief setup." | \
+                curl -s --url "smtp://${smtp_host}:${smtp_port}" \
+                --ssl-reqd \
+                --mail-from "$EMAIL" \
+                --mail-rcpt "$EMAIL" \
+                --user "${EMAIL}:${APP_PASSWORD}" \
+                -T - 2>/dev/null; then
+                ok "test email sent to $EMAIL"
+            else
+                warn "test email failed — check credentials (setup will continue)"
+            fi
+
+            DELIVERY_TO="$EMAIL"
+            ;;
     esac
 
-    prompt_required EMAIL "  Email address"
-
-    if [[ -n "$app_pw_url" ]]; then
-        echo ""
-        info "You need an app password (not your regular password)."
-        info "Steps:"
-        echo "    1. Go to $app_pw_url"
-        echo "    2. Create a new app password for 'daybrief'"
-        echo "    3. Paste it below"
-        echo ""
-        open "$app_pw_url" 2>/dev/null || true
-    fi
-
-    prompt_secret APP_PASSWORD "  App password"
-
-    # Test email
-    printf "  Sending test email... "
-    if echo "Subject: daybrief test\nFrom: $EMAIL\nTo: $EMAIL\n\nThis is a test email from daybrief setup." | \
-        curl -s --url "smtp://${smtp_host}:${smtp_port}" \
-        --ssl-reqd \
-        --mail-from "$EMAIL" \
-        --mail-rcpt "$EMAIL" \
-        --user "${EMAIL}:${APP_PASSWORD}" \
-        -T - 2>/dev/null; then
-        ok "test email sent to $EMAIL"
-    else
-        warn "test email failed — check credentials (setup will continue)"
-    fi
-
-    # ── 3/4 Twitter ──
+    # ── 3/5 Twitter DMs (optional) ──
     echo ""
-    printf "${BOLD}3/4${NC}  Twitter credentials\n"
-    prompt_required TWITTER_USERNAME "  Twitter username"
-    prompt_required TWITTER_EMAIL "  Twitter email"
-    prompt_secret TWITTER_PASSWORD "  Twitter password"
+    printf "${BOLD}3/5${NC}  Twitter DMs (optional — press Enter to skip)\n"
+    echo "    1) API Key (paste bearer token)"
+    echo "    2) Connect with X (coming soon)"
+    echo "    3) Skip"
+    printf "  Choice [3]: "
+    read -r twitter_choice
+    twitter_choice="${twitter_choice:-3}"
 
-    # ── 4/4 Full Disk Access ──
+    local TWITTER_BEARER_TOKEN=""
+
+    case "$twitter_choice" in
+        1)
+            echo ""
+            info "Get a bearer token from https://developer.x.com/en/portal/dashboard"
+            echo ""
+            if [[ -n "${DAYBRIEF_TEST_TWITTER_TOKEN:-}" ]]; then
+                info "DAYBRIEF_TEST_TWITTER_TOKEN detected — enter 'test' to use it."
+            fi
+            prompt_secret TWITTER_BEARER_TOKEN "  Bearer token"
+            if [[ "$TWITTER_BEARER_TOKEN" == "test" && -n "${DAYBRIEF_TEST_TWITTER_TOKEN:-}" ]]; then
+                TWITTER_BEARER_TOKEN="$DAYBRIEF_TEST_TWITTER_TOKEN"
+                ok "using test token from env"
+            fi
+            ;;
+        2)
+            if [[ -n "${DAYBRIEF_X_CLIENT_ID:-}" ]]; then
+                echo ""
+                info "Starting OAuth flow..."
+                # Check gateway is running
+                if ! curl -s -o /dev/null "http://localhost:3000/health" 2>/dev/null; then
+                    fail "gateway not running — start it first: brew services start daybrief"
+                    info "Skipping Twitter for now. Re-run setup after starting gateway."
+                else
+                    # Generate PKCE verifier
+                    local pkce_verifier
+                    pkce_verifier=$(openssl rand -base64 48 | tr '+/' '-_' | tr -d '=')
+                    local pkce_challenge
+                    pkce_challenge=$(printf '%s' "$pkce_verifier" | openssl dgst -sha256 -binary | openssl base64 | tr '+/' '-_' | tr -d '=')
+                    local oauth_state
+                    oauth_state=$(openssl rand -hex 16)
+
+                    local authorize_url="https://twitter.com/i/oauth2/authorize?response_type=code&client_id=${DAYBRIEF_X_CLIENT_ID}&redirect_uri=http://127.0.0.1:3000/oauth/twitter/callback&scope=dm.read%20offline.access&state=${oauth_state}&code_challenge=${pkce_challenge}&code_challenge_method=S256"
+
+                    info "Opening browser to authorize..."
+                    open "$authorize_url" 2>/dev/null || echo "  Open: $authorize_url"
+
+                    # Poll for auth.json entry
+                    info "Waiting for authorization (timeout: 120s)..."
+                    local waited=0
+                    while [[ $waited -lt 120 ]]; do
+                        if [[ -f "$HOME/.nullclaw/auth.json" ]] && python3 -c "import json; d=json.load(open('$HOME/.nullclaw/auth.json')); assert 'twitter' in d" 2>/dev/null; then
+                            ok "Twitter authorized via OAuth"
+                            break
+                        fi
+                        sleep 2
+                        waited=$((waited + 2))
+                    done
+                    if [[ $waited -ge 120 ]]; then
+                        warn "OAuth timed out — run 'daybrief reauth-twitter' to try again"
+                    fi
+                fi
+            else
+                echo ""
+                info "Coming soon! Once the daybrief X app is registered, this will"
+                info "open your browser to authorize access. For now, use API Key mode."
+            fi
+            ;;
+        3|*)
+            info "Skipping Twitter"
+            ;;
+    esac
+
+    # ── 4/5 Full Disk Access ──
     echo ""
-    printf "${BOLD}4/4${NC}  Full Disk Access\n"
+    printf "${BOLD}4/5${NC}  Full Disk Access\n"
     info "daybrief needs Full Disk Access to read iMessage."
     echo ""
     info "Opening System Settings → Full Disk Access..."
@@ -226,8 +343,6 @@ cmd_setup() {
     echo ""
     echo "  Waiting for Full Disk Access..."
     echo "  (press Enter after granting access)"
-    # Can't reliably detect FDA from Terminal (Terminal itself may have FDA).
-    # Wait for explicit user confirmation.
     local chat_db="$HOME/Library/Messages/chat.db"
     while true; do
         read -rp "  Have you added nullclaw to Full Disk Access? [y/n]: " fda_confirm
@@ -241,82 +356,42 @@ cmd_setup() {
         fi
     done
 
-    # ── Write configs ──
+    # ── 5/5 Write configs ──
     echo ""
-    info "Writing configuration..."
+    printf "${BOLD}5/5${NC}  Writing configuration...\n"
 
     # nullclaw config
     sed -e "s|\${ANTHROPIC_API_KEY}|${ANTHROPIC_API_KEY}|g" \
         -e "s|\${SMTP_HOST}|${smtp_host}|g" \
-        -e "s|\${SMTP_PORT}|${smtp_port}|g" \
+        -e "s|\${SMTP_PORT}|${smtp_port:-587}|g" \
         -e "s|\${SMTP_USER}|${EMAIL}|g" \
         -e "s|\${SMTP_PASSWORD}|${APP_PASSWORD}|g" \
         -e "s|\${EMAIL_FROM}|${EMAIL}|g" \
-        -e "s|\${DIGEST_RECIPIENT_EMAIL}|${EMAIL}|g" \
+        -e "s|\${SLACK_BOT_TOKEN}|${SLACK_BOT_TOKEN}|g" \
+        -e "s|\${SLACK_CHANNEL_ID}|${SLACK_CHANNEL_ID}|g" \
+        -e "s|\${TWITTER_BEARER_TOKEN}|${TWITTER_BEARER_TOKEN}|g" \
         "$TEMPLATE" > "$CONFIG"
     ok "wrote $CONFIG"
 
-    # twitter env
-    cat > "$TWITTER_ENV" <<ENV
-TWITTER_USERNAME=${TWITTER_USERNAME}
-TWITTER_EMAIL=${TWITTER_EMAIL}
-TWITTER_PASSWORD=${TWITTER_PASSWORD}
-DM_EXCLUDE_HANDLES=
-NULLCLAW_WEBHOOK_URL=http://localhost:3000/webhook
-NULLCLAW_WEBHOOK_TOKEN=
-POLL_INTERVAL_SECS=600
-ENV
-    ok "wrote $TWITTER_ENV"
-
-    # ── Twitter poller plist ──
-    local poller_python="${LIBEXEC}/venv/bin/python3"
-    local poller_script="${LIBEXEC}/twitter-poller/poller.py"
-    cat > "$TWITTER_PLIST" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>${TWITTER_PLIST_LABEL}</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>${poller_python}</string>
-        <string>${poller_script}</string>
-    </array>
-    <key>WorkingDirectory</key>
-    <string>${DATADIR}</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>DOTENV_PATH</key>
-        <string>${TWITTER_ENV}</string>
-    </dict>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>${LOGDIR}/twitter-poller.log</string>
-    <key>StandardErrorPath</key>
-    <string>${LOGDIR}/twitter-poller.err</string>
-</dict>
-</plist>
-PLIST
-    ok "wrote $TWITTER_PLIST"
+    # Copy workspace files
+    mkdir -p "$WORKSPACE_DIR"
+    if [[ -f "$LIBEXEC/../config/workspace/INTEGRATIONS.md" ]]; then
+        cp "$LIBEXEC/../config/workspace/INTEGRATIONS.md" "$WORKSPACE_DIR/"
+        ok "copied INTEGRATIONS.md to workspace"
+    fi
 
     # ── Create digest cron job ──
+    local digest_format="html"
+    [[ "$DELIVERY_CHANNEL" == "slack" ]] && digest_format="slack"
+
     local prompt
-    prompt=$(digest_prompt)
+    prompt=$(digest_prompt "$digest_format")
     "$NULLCLAW" cron add-agent "0 8 * * *" "$prompt" \
         --name daily-digest \
         --model claude-sonnet-4-20250514 \
         --delivery-mode always \
-        --delivery-channel email \
-        --delivery-to "$EMAIL" 2>/dev/null && ok "daily digest scheduled for 8am" || warn "cron job creation failed — run 'daybrief doctor'"
-
-    # ── Start twitter poller ──
-    echo ""
-    info "Starting twitter poller..."
-    launchctl load "$TWITTER_PLIST" 2>/dev/null && ok "twitter poller started" || warn "failed to start poller"
+        --delivery-channel "$DELIVERY_CHANNEL" \
+        --delivery-to "$DELIVERY_TO" 2>/dev/null && ok "daily digest scheduled for 8am" || warn "cron job creation failed — run 'daybrief doctor'"
 
     echo ""
     ok "Setup complete! Digest scheduled for 8am."
@@ -341,13 +416,34 @@ cmd_status() {
         fail "gateway        stopped"
     fi
 
-    # Twitter poller
-    local tw_pid
-    tw_pid=$(launchctl list 2>/dev/null | grep "$TWITTER_PLIST_LABEL" | awk '{print $1}')
-    if [[ -n "$tw_pid" && "$tw_pid" != "-" ]]; then
-        ok "twitter poller running (PID $tw_pid)"
-    else
-        fail "twitter poller stopped"
+    # Delivery channel
+    if [[ -f "$CONFIG" ]]; then
+        local slack_token
+        slack_token=$(python3 -c "import json; c=json.load(open('$CONFIG')).get('channels',{}); s=c.get('slack',[]); print(s[0].get('bot_token','') if s else '')" 2>/dev/null || echo "")
+        if [[ -n "$slack_token" && "$slack_token" != '${SLACK_BOT_TOKEN}' ]]; then
+            local slack_ch
+            slack_ch=$(python3 -c "import json; c=json.load(open('$CONFIG')).get('channels',{}); s=c.get('slack',[]); print(s[0].get('channel_id','') if s else '')" 2>/dev/null || echo "")
+            ok "slack delivery configured (channel $slack_ch)"
+        else
+            local email_from
+            email_from=$(python3 -c "import json; print(json.load(open('$CONFIG')).get('channels',{}).get('email',{}).get('from_address',''))" 2>/dev/null || echo "")
+            if [[ -n "$email_from" && "$email_from" != '${EMAIL_FROM}' ]]; then
+                ok "email delivery configured ($email_from)"
+            fi
+        fi
+    fi
+
+    # Twitter
+    if [[ -f "$CONFIG" ]]; then
+        local tw_bearer
+        tw_bearer=$(python3 -c "import json; c=json.load(open('$CONFIG')).get('channels',{}); t=c.get('twitter',[]); print(t[0].get('bearer_token','') if t else '')" 2>/dev/null || echo "")
+        if [[ -n "$tw_bearer" && "$tw_bearer" != '${TWITTER_BEARER_TOKEN}' ]]; then
+            ok "twitter        API key configured"
+        elif [[ -f "$HOME/.nullclaw/auth.json" ]] && python3 -c "import json; d=json.load(open('$HOME/.nullclaw/auth.json')); assert 'twitter' in d" 2>/dev/null; then
+            ok "twitter        OAuth configured"
+        else
+            warn "twitter        not configured"
+        fi
     fi
 
     # Digest cron
@@ -458,21 +554,43 @@ cmd_doctor() {
         fi
     fi
 
-    # 6. Python venv
-    local venv_python="${LIBEXEC}/venv/bin/python3"
-    if [[ -x "$venv_python" ]]; then
-        if "$venv_python" -c "import twikit" 2>/dev/null; then
-            ok "Python venv + twikit"
-        else
-            fail "twikit not installed in venv — reinstall daybrief"
-            ((issues++)) || true
+    # 6. Slack (if configured)
+    if [[ -f "$CONFIG" ]]; then
+        local slack_token
+        slack_token=$(python3 -c "import json; c=json.load(open('$CONFIG')).get('channels',{}); s=c.get('slack',[]); print(s[0].get('bot_token','') if s else '')" 2>/dev/null || echo "")
+        if [[ -n "$slack_token" && "$slack_token" != '${SLACK_BOT_TOKEN}' ]]; then
+            local slack_resp
+            slack_resp=$(curl -s "https://slack.com/api/auth.test" -H "Authorization: Bearer $slack_token" 2>/dev/null || echo '{"ok":false}')
+            if echo "$slack_resp" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get('ok') else 1)" 2>/dev/null; then
+                ok "Slack token valid"
+            else
+                fail "Slack token invalid — check bot_token in config"
+                ((issues++)) || true
+            fi
         fi
-    else
-        fail "Python venv missing at $venv_python"
-        ((issues++)) || true
     fi
 
-    # 7. Port 3000
+    # 7. Twitter (if configured)
+    if [[ -f "$CONFIG" ]]; then
+        local tw_token=""
+        tw_token=$(python3 -c "import json; c=json.load(open('$CONFIG')).get('channels',{}); t=c.get('twitter',[]); print(t[0].get('bearer_token','') if t else '')" 2>/dev/null || echo "")
+        if [[ -n "$tw_token" && "$tw_token" != '${TWITTER_BEARER_TOKEN}' ]]; then
+            local tw_http
+            tw_http=$(curl -s -o /dev/null -w "%{http_code}" \
+                -H "Authorization: Bearer $tw_token" \
+                "https://api.twitter.com/2/users/me" 2>/dev/null || echo "000")
+            if [[ "$tw_http" == "200" ]]; then
+                ok "Twitter API key valid"
+            else
+                fail "Twitter API key invalid (HTTP $tw_http)"
+                ((issues++)) || true
+            fi
+        elif [[ -f "$HOME/.nullclaw/auth.json" ]] && python3 -c "import json; d=json.load(open('$HOME/.nullclaw/auth.json')); assert 'twitter' in d" 2>/dev/null; then
+            ok "Twitter OAuth token present"
+        fi
+    fi
+
+    # 8. Port 3000
     if lsof -i :3000 -sTCP:LISTEN &>/dev/null; then
         ok "port 3000 in use (gateway)"
     else
@@ -490,12 +608,7 @@ cmd_doctor() {
 
 # ── logs ────────────────────────────────────────────────────────────
 cmd_logs() {
-    local target="${1:-all}"
-    case "$target" in
-        nullclaw)  tail -f "$LOGDIR"/nullclaw.log "$LOGDIR"/nullclaw.err 2>/dev/null ;;
-        twitter)   tail -f "$LOGDIR"/twitter-poller.log "$LOGDIR"/twitter-poller.err 2>/dev/null ;;
-        all|*)     tail -f "$LOGDIR"/*.log "$LOGDIR"/*.err 2>/dev/null ;;
-    esac
+    tail -f "$LOGDIR"/*.log "$LOGDIR"/*.err 2>/dev/null
 }
 
 # ── config ──────────────────────────────────────────────────────────
@@ -511,6 +624,8 @@ with open('$CONFIG') as f:
 text = re.sub(r'\"api_key\"\s*:\s*\"[^\"]+\"', '\"api_key\": \"***\"', text)
 text = re.sub(r'\"smtp_password\"\s*:\s*\"[^\"]+\"', '\"smtp_password\": \"***\"', text)
 text = re.sub(r'\"password\"\s*:\s*\"[^\"]+\"', '\"password\": \"***\"', text)
+text = re.sub(r'\"bot_token\"\s*:\s*\"[^\"]+\"', '\"bot_token\": \"***\"', text)
+text = re.sub(r'\"bearer_token\"\s*:\s*\"[^\"]+\"', '\"bearer_token\": \"***\"', text)
 print(text)
 "
             else
@@ -576,19 +691,6 @@ if '$contact' not in tw:
 else:
     print('$contact already excluded')
 "
-        # Also update twitter-poller env
-        if [[ -f "$TWITTER_ENV" ]]; then
-            local current
-            current=$(grep "^DM_EXCLUDE_HANDLES=" "$TWITTER_ENV" 2>/dev/null | cut -d= -f2)
-            local handle="${contact#@}"
-            if [[ -z "$current" ]]; then
-                sed -i '' "s|^DM_EXCLUDE_HANDLES=.*|DM_EXCLUDE_HANDLES=${handle}|" "$TWITTER_ENV"
-            else
-                sed -i '' "s|^DM_EXCLUDE_HANDLES=.*|DM_EXCLUDE_HANDLES=${current},${handle}|" "$TWITTER_ENV"
-            fi
-            # Restart poller
-            launchctl kickstart -k "gui/$(id -u)/${TWITTER_PLIST_LABEL}" 2>/dev/null || true
-        fi
     elif [[ "$contact" == +* || "$contact" =~ ^[0-9]+$ ]]; then
         # Phone number
         local number="$contact"
@@ -683,16 +785,6 @@ if '$contact' in tw:
 else:
     print('$contact not in exclusion list')
 "
-        # Also update twitter-poller env
-        if [[ -f "$TWITTER_ENV" ]]; then
-            local handle="${contact#@}"
-            local current
-            current=$(grep "^DM_EXCLUDE_HANDLES=" "$TWITTER_ENV" 2>/dev/null | cut -d= -f2)
-            local updated
-            updated=$(echo "$current" | tr ',' '\n' | grep -v "^${handle}$" | paste -sd, -)
-            sed -i '' "s|^DM_EXCLUDE_HANDLES=.*|DM_EXCLUDE_HANDLES=${updated}|" "$TWITTER_ENV"
-            launchctl kickstart -k "gui/$(id -u)/${TWITTER_PLIST_LABEL}" 2>/dev/null || true
-        fi
     elif [[ "$contact" == +* || "$contact" =~ ^[0-9]+$ ]]; then
         local number="$contact"
         [[ "$number" != +* ]] && number="+$number"
@@ -720,6 +812,12 @@ else:
 }
 
 _regenerate_digest_job() {
+    # Ensure workspace files exist
+    mkdir -p "$WORKSPACE_DIR"
+    if [[ -f "$LIBEXEC/../config/workspace/INTEGRATIONS.md" ]] && [[ ! -f "$WORKSPACE_DIR/INTEGRATIONS.md" ]]; then
+        cp "$LIBEXEC/../config/workspace/INTEGRATIONS.md" "$WORKSPACE_DIR/"
+    fi
+
     local job_id
     job_id=$(get_digest_job_id)
     if [[ -z "$job_id" ]]; then
@@ -727,30 +825,72 @@ _regenerate_digest_job() {
         return
     fi
 
-    # Get current job's delivery config
-    local email
-    email=$(python3 -c "import json; print(json.load(open('$CONFIG')).get('channels',{}).get('email',{}).get('from_address',''))" 2>/dev/null || echo "")
+    # Detect delivery channel from config
+    local delivery_channel="email"
+    local delivery_to=""
+    local slack_token
+    slack_token=$(python3 -c "import json; c=json.load(open('$CONFIG')).get('channels',{}); s=c.get('slack',[]); print(s[0].get('bot_token','') if s else '')" 2>/dev/null || echo "")
+    if [[ -n "$slack_token" && "$slack_token" != '${SLACK_BOT_TOKEN}' ]]; then
+        delivery_channel="slack"
+        delivery_to=$(python3 -c "import json; c=json.load(open('$CONFIG')).get('channels',{}); s=c.get('slack',[]); print(s[0].get('channel_id','') if s else '')" 2>/dev/null || echo "")
+    else
+        delivery_to=$(python3 -c "import json; print(json.load(open('$CONFIG')).get('channels',{}).get('email',{}).get('from_address',''))" 2>/dev/null || echo "")
+    fi
 
     # Remove old job and recreate with updated exclusions
     "$NULLCLAW" cron remove "$job_id" 2>/dev/null || true
 
+    local digest_format="html"
+    [[ "$delivery_channel" == "slack" ]] && digest_format="slack"
+
     local prompt
-    prompt=$(digest_prompt)
+    prompt=$(digest_prompt "$digest_format")
     "$NULLCLAW" cron add-agent "0 8 * * *" "$prompt" \
         --name daily-digest \
         --model claude-sonnet-4-20250514 \
         --delivery-mode always \
-        --delivery-channel email \
-        --delivery-to "$email" 2>/dev/null && ok "digest job updated with exclusions" || warn "failed to update digest job"
+        --delivery-channel "$delivery_channel" \
+        --delivery-to "$delivery_to" 2>/dev/null && ok "digest job updated with exclusions" || warn "failed to update digest job"
 }
 
 # ── reauth-twitter ──────────────────────────────────────────────────
 cmd_reauth_twitter() {
-    info "clearing Twitter cookies..."
-    rm -f "$DATADIR/cookies.json"
-    ok "cookies removed"
-    info "restarting twitter poller..."
-    launchctl kickstart -k "gui/$(id -u)/${TWITTER_PLIST_LABEL}" 2>/dev/null && ok "poller restarted" || fail "failed to restart poller"
+    # Detect current mode
+    local tw_bearer=""
+    if [[ -f "$CONFIG" ]]; then
+        tw_bearer=$(python3 -c "import json; c=json.load(open('$CONFIG')).get('channels',{}); t=c.get('twitter',[]); print(t[0].get('bearer_token','') if t else '')" 2>/dev/null || echo "")
+    fi
+
+    if [[ -n "$tw_bearer" && "$tw_bearer" != '${TWITTER_BEARER_TOKEN}' ]]; then
+        info "Current mode: API Key"
+        echo "  Enter new bearer token (or press Enter to keep current):"
+        local new_token
+        read -rs new_token
+        echo ""
+        if [[ -n "$new_token" ]]; then
+            # Update config in-place
+            python3 -c "
+import json
+with open('$CONFIG') as f: c = json.load(f)
+c['channels']['twitter'][0]['bearer_token'] = '$new_token'
+with open('$CONFIG', 'w') as f: json.dump(c, f, indent=2)
+" 2>/dev/null && ok "bearer token updated" || fail "failed to update token"
+        else
+            info "keeping current token"
+        fi
+    elif [[ -f "$HOME/.nullclaw/auth.json" ]] && python3 -c "import json; d=json.load(open('$HOME/.nullclaw/auth.json')); assert 'twitter' in d" 2>/dev/null; then
+        info "Current mode: OAuth"
+        info "Removing saved credential..."
+        python3 -c "
+import json
+with open('$HOME/.nullclaw/auth.json') as f: d = json.load(f)
+d.pop('twitter', None)
+with open('$HOME/.nullclaw/auth.json', 'w') as f: json.dump(d, f, indent=2)
+" 2>/dev/null && ok "OAuth token removed" || fail "failed to remove token"
+        info "Re-run 'daybrief setup' to re-authorize."
+    else
+        fail "Twitter not configured — run 'daybrief setup'"
+    fi
 }
 
 # ── remote ──────────────────────────────────────────────────────────
@@ -795,16 +935,14 @@ cmd_remote() {
 
 # ── uninstall ───────────────────────────────────────────────────────
 cmd_uninstall() {
-    warn "this will stop daybrief services and remove LaunchAgents"
+    warn "this will stop daybrief services"
     printf "Continue? [y/N] "
     read -r confirm
     [[ "$confirm" =~ ^[yY] ]] || { echo "Cancelled."; return; }
 
     info "stopping services..."
     brew services stop daybrief 2>/dev/null || true
-    launchctl unload "$TWITTER_PLIST" 2>/dev/null || true
-    rm -f "$TWITTER_PLIST"
-    ok "services stopped, plists removed"
+    ok "services stopped"
 
     if command -v tailscale &>/dev/null && tailscale status &>/dev/null; then
         info "disconnecting Tailscale..."

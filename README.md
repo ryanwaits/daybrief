@@ -12,14 +12,19 @@ brew services start daybrief
 
 That's it. First digest arrives tomorrow at 8am.
 
+**Or set up conversationally via iMessage** — just message the nullclaw agent and it will walk you through Slack, Twitter, and delivery configuration step by step. No terminal required. See [Conversational setup](#conversational-setup) below.
+
 ## What you need
 
 - macOS (for iMessage access)
 - Anthropic API key ([get one here](https://console.anthropic.com/settings/keys))
 - Email account (Gmail, iCloud, or Outlook) with an app password
 - Twitter credentials (username, email, password)
+- Slack bot token (optional — for Slack digest delivery instead of email)
 
 ## Setup walkthrough
+
+### Terminal wizard
 
 `daybrief setup` walks you through 4 steps:
 
@@ -32,6 +37,16 @@ That's it. First digest arrives tomorrow at 8am.
 **Step 4 — Full Disk Access.** Opens System Settings automatically. Add the nullclaw binary, and setup waits until access is granted.
 
 Done. Config is written, services start, digest is scheduled for 8am.
+
+### Conversational setup
+
+You can also set up Slack and Twitter integrations conversationally via iMessage -- no terminal needed. The nullclaw agent has tools to walk you through the process:
+
+- **Slack** — the agent guides you through creating a Slack app, getting your bot token, picking a channel, and verifying delivery with a test message.
+- **Twitter** — the agent collects your API bearer token and configures DM polling.
+- **Delivery switching** — the agent can change your digest delivery from email to Slack (or back) and restart the service for you.
+
+Just message the agent something like "set up Slack" or "I want my digest in Slack" and it handles the rest.
 
 ## Daily usage
 
@@ -137,7 +152,7 @@ rm -rf ~/.nullclaw ~/.local/share/daybrief
 
 | Command | What it does |
 |---------|-------------|
-| `daybrief setup` | One-time configuration wizard |
+| `daybrief setup` | One-time configuration wizard (or use conversational setup via iMessage) |
 | `daybrief status` | Service health (✓/✗) |
 | `daybrief doctor` | Diagnose issues with actionable fixes |
 | `daybrief logs [nullclaw\|twitter]` | Tail service logs |
@@ -166,7 +181,7 @@ Your Mac (always-on)
 
 1. **iMessage** — nullclaw reads `~/Library/Messages/chat.db` directly (polls every 3s)
 2. **Twitter DMs** — Python poller uses twikit (cookie-based), posts new DMs to nullclaw webhook, stored in memory
-3. **Daily digest** — 8am cron job triggers a Claude agent that reads 24h of messages, summarizes, and emails you
+3. **Daily digest** — 8am cron job triggers a Claude agent that reads 24h of messages, summarizes, and delivers via email or Slack
 
 ## File locations
 
@@ -191,3 +206,5 @@ cd daybrief
 ./scripts/setup.sh       # builds nullclaw, creates Python venv
 ./scripts/onboard.sh     # interactive configuration wizard
 ```
+
+Alternatively, after building, you can configure Slack and Twitter integrations conversationally through the nullclaw agent via iMessage instead of running the onboard script.
