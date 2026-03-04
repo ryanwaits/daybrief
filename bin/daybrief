@@ -14,7 +14,7 @@ DATADIR="$HOME/.local/share/daybrief"
 EXCLUSIONS="$DATADIR/exclusions.json"
 NULLCLAW_PLIST_LABEL="homebrew.mxcl.daybrief"
 WORKSPACE_DIR="$HOME/.nullclaw/workspace"
-VERSION="0.1.0"
+VERSION="0.2.1"
 
 # ── Colors ──────────────────────────────────────────────────────────
 RED='\033[0;31m'
