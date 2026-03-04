@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  repository_dispatch:
+    types: [nullclaw-release]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            echo "tag=${{ github.event.client_payload.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download nullclaw macOS binaries
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NULLCLAW_TAG="${{ github.event.client_payload.nullclaw_tag || 'v2026.3.1' }}"
+          mkdir -p dist
+
+          gh release download "$NULLCLAW_TAG" \
+            --repo ryanwaits/nullclaw \
+            --pattern "nullclaw-macos-*.bin" \
+            --dir dist/ || echo "Warning: could not download nullclaw binaries"
+
+      - name: Package source
+        run: |
+          VERSION="${{ steps.version.outputs.tag }}"
+          tar czf "daybrief-${VERSION}.tar.gz" \
+            --exclude='.git' \
+            --exclude='nullclaw' \
+            --exclude='*.tar.gz' \
+            bin/ twitter-poller/ config/ README.md
+
+      - name: Generate SHA256 checksums
+        run: |
+          VERSION="${{ steps.version.outputs.tag }}"
+          sha256sum "daybrief-${VERSION}.tar.gz" > checksums.txt
+          sha256sum dist/*.bin >> checksums.txt 2>/dev/null || true
+          cat checksums.txt
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.tag }}"
+          gh release create "$VERSION" \
+            --title "daybrief $VERSION" \
+            --generate-notes \
+            "daybrief-${VERSION}.tar.gz" \
+            checksums.txt \
+            dist/*.bin 2>/dev/null || \
+          gh release create "$VERSION" \
+            --title "daybrief $VERSION" \
+            --generate-notes \
+            "daybrief-${VERSION}.tar.gz" \
+            checksums.txt
+
+      - name: Update Homebrew formula
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_PAT }}
+        run: |
+          VERSION="${{ steps.version.outputs.tag }}"
+          TARBALL_SHA=$(sha256sum "daybrief-${VERSION}.tar.gz" | awk '{print $1}')
+
+          # Open PR to update formula
+          gh workflow run update-formula.yml \
+            --repo ryanwaits/homebrew-daybrief \
+            -f version="$VERSION" \
+            -f sha256="$TARBALL_SHA" 2>/dev/null || echo "Formula update skipped (workflow not found)"

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ben-digest.twitter-poller</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/ben-digest-venv/bin/python3</string>
+        <string>/usr/local/lib/ben-digest/twitter-poller/poller.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/usr/local/lib/ben-digest/twitter-poller</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/ben-digest-twitter-poller.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/ben-digest-twitter-poller.err</string>
+</dict>
+</plist>

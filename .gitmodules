@@ -1,0 +1,3 @@
+[submodule "nullclaw"]
+	path = nullclaw
+	url = https://github.com/ryanwaits/nullclaw.git

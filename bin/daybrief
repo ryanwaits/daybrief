@@ -1,0 +1,827 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ── Paths (replaced by Homebrew formula install) ────────────────────
+NULLCLAW="@@NULLCLAW@@"
+LIBEXEC="@@LIBEXEC@@"
+LOGDIR="@@LOGDIR@@"
+TEMPLATE="@@TEMPLATE@@"
+ABDB="@@ABDB@@"
+
+# ── Constants ───────────────────────────────────────────────────────
+CONFIG="$HOME/.nullclaw/config.json"
+DATADIR="$HOME/.local/share/daybrief"
+EXCLUSIONS="$DATADIR/exclusions.json"
+TWITTER_ENV="$DATADIR/twitter-poller.env"
+TWITTER_PLIST_LABEL="com.daybrief.twitter-poller"
+NULLCLAW_PLIST_LABEL="com.daybrief.nullclaw"
+TWITTER_PLIST="$HOME/Library/LaunchAgents/${TWITTER_PLIST_LABEL}.plist"
+VERSION="0.1.0"
+
+# ── Colors ──────────────────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+ok()   { printf "${GREEN}✓${NC} %s\n" "$1"; }
+fail() { printf "${RED}✗${NC} %s\n" "$1"; }
+warn() { printf "${YELLOW}!${NC} %s\n" "$1"; }
+info() { printf "${CYAN}→${NC} %s\n" "$1"; }
+
+# ── Helpers ─────────────────────────────────────────────────────────
+prompt_required() {
+    local var_name="$1" prompt_text="$2" value=""
+    while [[ -z "$value" ]]; do
+        printf "%s: " "$prompt_text"
+        read -r value
+    done
+    eval "$var_name=\$value"
+}
+
+prompt_secret() {
+    local var_name="$1" prompt_text="$2" value=""
+    while [[ -z "$value" ]]; do
+        printf "%s: " "$prompt_text"
+        read -rs value
+        echo ""
+    done
+    eval "$var_name=\$value"
+}
+
+ensure_datadir() {
+    mkdir -p "$DATADIR"
+}
+
+ensure_exclusions() {
+    ensure_datadir
+    if [[ ! -f "$EXCLUSIONS" ]]; then
+        echo '{"imessage":[],"twitter":[]}' > "$EXCLUSIONS"
+    fi
+}
+
+digest_prompt() {
+    local exclude_text=""
+    if [[ -f "$EXCLUSIONS" ]]; then
+        local im_list tw_list
+        im_list=$(python3 -c "import json; d=json.load(open('$EXCLUSIONS')); print(', '.join(d.get('imessage',[])))" 2>/dev/null || echo "")
+        tw_list=$(python3 -c "import json; d=json.load(open('$EXCLUSIONS')); print(', '.join(d.get('twitter',[])))" 2>/dev/null || echo "")
+        if [[ -n "$im_list" || -n "$tw_list" ]]; then
+            exclude_text=" Exclude messages from: ${im_list}${im_list:+, }${tw_list}."
+        fi
+    fi
+    echo "Use the message_history tool with hours_back=24 to get all iMessages from the last 24 hours. Then use memory_recall with query \"twitter DM\" to get recent Twitter DMs. Group messages by contact/sender. For each conversation: summarize the key points in 1-2 sentences. Then create sections: Key Conversations (sorted by importance), Action Items (anything requiring follow-up), and Interesting Signals (notable patterns or opportunities). If no messages found, say so. If more than 100 messages, focus on the top 20 most substantive conversations. Format as clean HTML email.${exclude_text}"
+}
+
+get_digest_job_id() {
+    "$NULLCLAW" cron list 2>/dev/null | grep -i "daily-digest" | awk '{print $1}' | head -1
+}
+
+# ── version ─────────────────────────────────────────────────────────
+cmd_version() {
+    echo "daybrief ${VERSION}"
+    if [[ -x "$NULLCLAW" ]]; then
+        echo "nullclaw $("$NULLCLAW" --version 2>/dev/null || echo "unknown")"
+    fi
+}
+
+# ── help ────────────────────────────────────────────────────────────
+cmd_help() {
+    cat <<EOF
+${BOLD}daybrief${NC} — daily iMessage + Twitter DM digest
+
+${BOLD}USAGE${NC}
+    daybrief <command> [args]
+
+${BOLD}COMMANDS${NC}
+    setup                  Configure daybrief (one-time wizard)
+    status                 Show service health
+    doctor                 Diagnose common issues
+    logs [nullclaw|twitter] Tail service logs
+    config                 Edit config in \$EDITOR
+    config show            Print config (secrets redacted)
+    test-digest            Trigger a digest right now
+    exclude <contact>      Exclude a contact from digest
+    include <contact>      Remove contact from exclusion list
+    exclude --list         Show all excluded contacts
+    reauth-twitter         Re-authenticate Twitter (clears cookies)
+    remote enable <key>    Enable remote access via Tailscale
+    remote disable         Disable remote access
+    remote status          Show Tailscale status
+    uninstall              Stop services, remove plists
+    version                Print version info
+    help                   Show this help
+
+${BOLD}EXAMPLES${NC}
+    daybrief setup
+    daybrief exclude tiffany
+    daybrief exclude @spambot
+    daybrief exclude +15551234567
+    daybrief test-digest
+    daybrief remote enable tskey-auth-abc123
+EOF
+}
+
+# ── setup ───────────────────────────────────────────────────────────
+cmd_setup() {
+    echo ""
+    printf "${BOLD}daybrief setup${NC}\n"
+    echo ""
+
+    ensure_datadir
+    mkdir -p "$HOME/.nullclaw"
+
+    # ── 1/4 Anthropic API key ──
+    printf "${BOLD}1/4${NC}  Anthropic API key\n"
+    prompt_secret ANTHROPIC_API_KEY "  API key (sk-ant-...)"
+    printf "  Validating... "
+    local http_code
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+        -H "x-api-key: $ANTHROPIC_API_KEY" \
+        -H "anthropic-version: 2023-06-01" \
+        "https://api.anthropic.com/v1/models" 2>/dev/null || echo "000")
+    if [[ "$http_code" == "200" ]]; then
+        ok "API key valid"
+    else
+        warn "API returned HTTP $http_code (may still work)"
+    fi
+
+    # ── 2/4 Email ──
+    echo ""
+    printf "${BOLD}2/4${NC}  Email delivery\n"
+    echo "  Which email provider?"
+    echo "    1) Gmail"
+    echo "    2) iCloud"
+    echo "    3) Outlook"
+    echo "    4) Other"
+    printf "  Choice [1]: "
+    read -r provider_choice
+    provider_choice="${provider_choice:-1}"
+
+    local smtp_host smtp_port app_pw_url
+    case "$provider_choice" in
+        1) smtp_host="smtp.gmail.com"; smtp_port="587"; app_pw_url="https://myaccount.google.com/apppasswords" ;;
+        2) smtp_host="smtp.mail.me.com"; smtp_port="587"; app_pw_url="https://appleid.apple.com/account/manage" ;;
+        3) smtp_host="smtp.office365.com"; smtp_port="587"; app_pw_url="" ;;
+        4)
+            prompt_required smtp_host "  SMTP host"
+            prompt_required smtp_port "  SMTP port"
+            app_pw_url=""
+            ;;
+        *) smtp_host="smtp.gmail.com"; smtp_port="587"; app_pw_url="https://myaccount.google.com/apppasswords" ;;
+    esac
+
+    prompt_required EMAIL "  Email address"
+
+    if [[ -n "$app_pw_url" ]]; then
+        echo ""
+        info "You need an app password (not your regular password)."
+        info "Steps:"
+        echo "    1. Go to $app_pw_url"
+        echo "    2. Create a new app password for 'daybrief'"
+        echo "    3. Paste it below"
+        echo ""
+        open "$app_pw_url" 2>/dev/null || true
+    fi
+
+    prompt_secret APP_PASSWORD "  App password"
+
+    # Test email
+    printf "  Sending test email... "
+    if echo "Subject: daybrief test\nFrom: $EMAIL\nTo: $EMAIL\n\nThis is a test email from daybrief setup." | \
+        curl -s --url "smtp://${smtp_host}:${smtp_port}" \
+        --ssl-reqd \
+        --mail-from "$EMAIL" \
+        --mail-rcpt "$EMAIL" \
+        --user "${EMAIL}:${APP_PASSWORD}" \
+        -T - 2>/dev/null; then
+        ok "test email sent to $EMAIL"
+    else
+        warn "test email failed — check credentials (setup will continue)"
+    fi
+
+    # ── 3/4 Twitter ──
+    echo ""
+    printf "${BOLD}3/4${NC}  Twitter credentials\n"
+    prompt_required TWITTER_USERNAME "  Twitter username"
+    prompt_required TWITTER_EMAIL "  Twitter email"
+    prompt_secret TWITTER_PASSWORD "  Twitter password"
+
+    # ── 4/4 Full Disk Access ──
+    echo ""
+    printf "${BOLD}4/4${NC}  Full Disk Access\n"
+    info "daybrief needs Full Disk Access to read iMessage."
+    info "Opening System Settings..."
+    open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles" 2>/dev/null || true
+    echo ""
+    info "Add the nullclaw binary: $NULLCLAW"
+    echo "  Waiting for Full Disk Access..."
+    local chat_db="$HOME/Library/Messages/chat.db"
+    while true; do
+        if [[ -r "$chat_db" ]]; then
+            ok "Full Disk Access granted"
+            break
+        fi
+        sleep 2
+    done
+
+    # ── Write configs ──
+    echo ""
+    info "Writing configuration..."
+
+    # nullclaw config
+    sed -e "s|\${ANTHROPIC_API_KEY}|${ANTHROPIC_API_KEY}|g" \
+        -e "s|\${SMTP_HOST}|${smtp_host}|g" \
+        -e "s|\${SMTP_PORT}|${smtp_port}|g" \
+        -e "s|\${SMTP_USER}|${EMAIL}|g" \
+        -e "s|\${SMTP_PASSWORD}|${APP_PASSWORD}|g" \
+        -e "s|\${EMAIL_FROM}|${EMAIL}|g" \
+        -e "s|\${DIGEST_RECIPIENT_EMAIL}|${EMAIL}|g" \
+        "$TEMPLATE" > "$CONFIG"
+    ok "wrote $CONFIG"
+
+    # twitter env
+    cat > "$TWITTER_ENV" <<ENV
+TWITTER_USERNAME=${TWITTER_USERNAME}
+TWITTER_EMAIL=${TWITTER_EMAIL}
+TWITTER_PASSWORD=${TWITTER_PASSWORD}
+DM_EXCLUDE_HANDLES=
+NULLCLAW_WEBHOOK_URL=http://localhost:3000/webhook
+NULLCLAW_WEBHOOK_TOKEN=
+POLL_INTERVAL_SECS=600
+ENV
+    ok "wrote $TWITTER_ENV"
+
+    # ── Twitter poller plist ──
+    local poller_python="${LIBEXEC}/venv/bin/python3"
+    local poller_script="${LIBEXEC}/twitter-poller/poller.py"
+    cat > "$TWITTER_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${TWITTER_PLIST_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${poller_python}</string>
+        <string>${poller_script}</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>${DATADIR}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>DOTENV_PATH</key>
+        <string>${TWITTER_ENV}</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>${LOGDIR}/twitter-poller.log</string>
+    <key>StandardErrorPath</key>
+    <string>${LOGDIR}/twitter-poller.err</string>
+</dict>
+</plist>
+PLIST
+    ok "wrote $TWITTER_PLIST"
+
+    # ── Create digest cron job ──
+    local prompt
+    prompt=$(digest_prompt)
+    "$NULLCLAW" cron add-agent "0 8 * * *" "$prompt" \
+        --name daily-digest \
+        --model claude-sonnet-4-20250514 \
+        --delivery-mode always \
+        --delivery-channel email \
+        --delivery-to "$EMAIL" 2>/dev/null && ok "daily digest scheduled for 8am" || warn "cron job creation failed — run 'daybrief doctor'"
+
+    # ── Start services ──
+    echo ""
+    info "Starting services..."
+    brew services start daybrief 2>/dev/null && ok "nullclaw gateway started" || warn "failed to start gateway"
+    launchctl load "$TWITTER_PLIST" 2>/dev/null && ok "twitter poller started" || warn "failed to start poller"
+
+    echo ""
+    ok "Config written, services starting, digest scheduled for 8am."
+    echo "  Done! First digest arrives tomorrow."
+    echo ""
+    cmd_status
+}
+
+# ── status ──────────────────────────────────────────────────────────
+cmd_status() {
+    printf "${BOLD}daybrief status${NC}\n\n"
+
+    # Gateway service
+    local gw_pid
+    gw_pid=$(launchctl list 2>/dev/null | grep "$NULLCLAW_PLIST_LABEL" | awk '{print $1}')
+    if [[ -n "$gw_pid" && "$gw_pid" != "-" ]]; then
+        ok "gateway        running (PID $gw_pid)"
+    else
+        fail "gateway        stopped"
+    fi
+
+    # Twitter poller
+    local tw_pid
+    tw_pid=$(launchctl list 2>/dev/null | grep "$TWITTER_PLIST_LABEL" | awk '{print $1}')
+    if [[ -n "$tw_pid" && "$tw_pid" != "-" ]]; then
+        ok "twitter poller running (PID $tw_pid)"
+    else
+        fail "twitter poller stopped"
+    fi
+
+    # Digest cron
+    local job_id
+    job_id=$(get_digest_job_id)
+    if [[ -n "$job_id" ]]; then
+        ok "digest cron    scheduled (job $job_id)"
+    else
+        fail "digest cron    not found"
+    fi
+
+    # Gateway endpoint
+    if curl -s -o /dev/null -w "" "http://localhost:3000/health" 2>/dev/null; then
+        ok "endpoint       http://localhost:3000 reachable"
+    else
+        fail "endpoint       http://localhost:3000 unreachable"
+    fi
+
+    # Tailscale (optional)
+    if command -v tailscale &>/dev/null; then
+        if tailscale status &>/dev/null; then
+            local ts_ip
+            ts_ip=$(tailscale ip -4 2>/dev/null || echo "unknown")
+            ok "remote access  enabled ($ts_ip)"
+        else
+            warn "remote access  Tailscale installed but not connected"
+        fi
+    fi
+}
+
+# ── doctor ──────────────────────────────────────────────────────────
+cmd_doctor() {
+    printf "${BOLD}daybrief doctor${NC}\n\n"
+    local issues=0
+
+    # 1. Full Disk Access
+    if [[ -r "$HOME/Library/Messages/chat.db" ]]; then
+        ok "Full Disk Access"
+    else
+        fail "Full Disk Access — grant in System Settings → Privacy → Full Disk Access"
+        ((issues++)) || true
+    fi
+
+    # 2. Binary
+    if [[ -x "$NULLCLAW" ]]; then
+        ok "nullclaw binary ($NULLCLAW)"
+    else
+        fail "nullclaw binary not found at $NULLCLAW"
+        ((issues++)) || true
+    fi
+
+    # 3. Config
+    if [[ -f "$CONFIG" ]]; then
+        if python3 -c "import json; json.load(open('$CONFIG'))" 2>/dev/null; then
+            ok "config valid JSON ($CONFIG)"
+        else
+            fail "config is invalid JSON — run: daybrief config"
+            ((issues++)) || true
+        fi
+    else
+        fail "config missing — run: daybrief setup"
+        ((issues++)) || true
+    fi
+
+    # 4. Anthropic API key
+    if [[ -f "$CONFIG" ]]; then
+        local api_key
+        api_key=$(python3 -c "import json; print(json.load(open('$CONFIG')).get('models',{}).get('providers',{}).get('anthropic',{}).get('api_key',''))" 2>/dev/null || echo "")
+        if [[ -n "$api_key" && "$api_key" != '${ANTHROPIC_API_KEY}' ]]; then
+            local http_code
+            http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+                -H "x-api-key: $api_key" \
+                -H "anthropic-version: 2023-06-01" \
+                "https://api.anthropic.com/v1/models" 2>/dev/null || echo "000")
+            if [[ "$http_code" == "200" ]]; then
+                ok "Anthropic API key valid"
+            else
+                fail "Anthropic API key invalid (HTTP $http_code)"
+                ((issues++)) || true
+            fi
+        else
+            fail "Anthropic API key not configured"
+            ((issues++)) || true
+        fi
+    fi
+
+    # 5. SMTP
+    if [[ -f "$CONFIG" ]]; then
+        local smtp_host
+        smtp_host=$(python3 -c "import json; print(json.load(open('$CONFIG')).get('channels',{}).get('email',{}).get('smtp_host',''))" 2>/dev/null || echo "")
+        local smtp_port
+        smtp_port=$(python3 -c "import json; print(json.load(open('$CONFIG')).get('channels',{}).get('email',{}).get('smtp_port',587))" 2>/dev/null || echo "587")
+        if [[ -n "$smtp_host" && "$smtp_host" != '${SMTP_HOST}' ]]; then
+            if openssl s_client -connect "${smtp_host}:${smtp_port}" -starttls smtp </dev/null 2>/dev/null | grep -q "Verify return code: 0"; then
+                ok "SMTP reachable ($smtp_host:$smtp_port)"
+            else
+                # Try without starttls verification (still connectable)
+                if timeout 5 bash -c "echo Q | openssl s_client -connect ${smtp_host}:${smtp_port} -starttls smtp 2>/dev/null" | grep -q "CONNECTED"; then
+                    ok "SMTP connectable ($smtp_host:$smtp_port)"
+                else
+                    fail "SMTP unreachable ($smtp_host:$smtp_port)"
+                    ((issues++)) || true
+                fi
+            fi
+        else
+            fail "SMTP not configured — run: daybrief setup"
+            ((issues++)) || true
+        fi
+    fi
+
+    # 6. Python venv
+    local venv_python="${LIBEXEC}/venv/bin/python3"
+    if [[ -x "$venv_python" ]]; then
+        if "$venv_python" -c "import twikit" 2>/dev/null; then
+            ok "Python venv + twikit"
+        else
+            fail "twikit not installed in venv — reinstall daybrief"
+            ((issues++)) || true
+        fi
+    else
+        fail "Python venv missing at $venv_python"
+        ((issues++)) || true
+    fi
+
+    # 7. Port 3000
+    if lsof -i :3000 -sTCP:LISTEN &>/dev/null; then
+        ok "port 3000 in use (gateway)"
+    else
+        fail "port 3000 not listening — gateway not running"
+        ((issues++)) || true
+    fi
+
+    echo ""
+    if [[ "$issues" -eq 0 ]]; then
+        ok "all checks passed"
+    else
+        fail "$issues issue(s) found"
+    fi
+}
+
+# ── logs ────────────────────────────────────────────────────────────
+cmd_logs() {
+    local target="${1:-all}"
+    case "$target" in
+        nullclaw)  tail -f "$LOGDIR"/nullclaw.log "$LOGDIR"/nullclaw.err 2>/dev/null ;;
+        twitter)   tail -f "$LOGDIR"/twitter-poller.log "$LOGDIR"/twitter-poller.err 2>/dev/null ;;
+        all|*)     tail -f "$LOGDIR"/*.log "$LOGDIR"/*.err 2>/dev/null ;;
+    esac
+}
+
+# ── config ──────────────────────────────────────────────────────────
+cmd_config() {
+    local subcmd="${1:-edit}"
+    case "$subcmd" in
+        show)
+            if [[ -f "$CONFIG" ]]; then
+                python3 -c "
+import json, re, sys
+with open('$CONFIG') as f:
+    text = f.read()
+text = re.sub(r'\"api_key\"\s*:\s*\"[^\"]+\"', '\"api_key\": \"***\"', text)
+text = re.sub(r'\"smtp_password\"\s*:\s*\"[^\"]+\"', '\"smtp_password\": \"***\"', text)
+text = re.sub(r'\"password\"\s*:\s*\"[^\"]+\"', '\"password\": \"***\"', text)
+print(text)
+"
+            else
+                fail "config not found at $CONFIG"
+            fi
+            ;;
+        edit|*)
+            "${EDITOR:-vim}" "$CONFIG"
+            ;;
+    esac
+}
+
+# ── test-digest ─────────────────────────────────────────────────────
+cmd_test_digest() {
+    local job_id
+    job_id=$(get_digest_job_id)
+    if [[ -z "$job_id" ]]; then
+        fail "no digest cron job found — run: daybrief setup"
+        return 1
+    fi
+    info "triggering digest now (job $job_id)..."
+    "$NULLCLAW" cron run "$job_id"
+}
+
+# ── exclude / include ──────────────────────────────────────────────
+cmd_exclude() {
+    if [[ "${1:-}" == "--list" ]]; then
+        ensure_exclusions
+        python3 -c "
+import json
+with open('$EXCLUSIONS') as f:
+    d = json.load(f)
+im = d.get('imessage', [])
+tw = d.get('twitter', [])
+if im:
+    print('iMessage:')
+    for x in im: print(f'  {x}')
+if tw:
+    print('Twitter:')
+    for x in tw: print(f'  {x}')
+if not im and not tw:
+    print('No exclusions.')
+"
+        return
+    fi
+
+    local contact="${1:?Usage: daybrief exclude <name|+number|@handle>}"
+    ensure_exclusions
+
+    if [[ "$contact" == @* ]]; then
+        # Twitter handle
+        python3 -c "
+import json
+with open('$EXCLUSIONS') as f:
+    d = json.load(f)
+tw = d.get('twitter', [])
+if '$contact' not in tw:
+    tw.append('$contact')
+    d['twitter'] = tw
+    with open('$EXCLUSIONS', 'w') as f:
+        json.dump(d, f, indent=2)
+    print('Added $contact to Twitter exclusions')
+else:
+    print('$contact already excluded')
+"
+        # Also update twitter-poller env
+        if [[ -f "$TWITTER_ENV" ]]; then
+            local current
+            current=$(grep "^DM_EXCLUDE_HANDLES=" "$TWITTER_ENV" 2>/dev/null | cut -d= -f2)
+            local handle="${contact#@}"
+            if [[ -z "$current" ]]; then
+                sed -i '' "s|^DM_EXCLUDE_HANDLES=.*|DM_EXCLUDE_HANDLES=${handle}|" "$TWITTER_ENV"
+            else
+                sed -i '' "s|^DM_EXCLUDE_HANDLES=.*|DM_EXCLUDE_HANDLES=${current},${handle}|" "$TWITTER_ENV"
+            fi
+            # Restart poller
+            launchctl kickstart -k "gui/$(id -u)/${TWITTER_PLIST_LABEL}" 2>/dev/null || true
+        fi
+    elif [[ "$contact" == +* || "$contact" =~ ^[0-9]+$ ]]; then
+        # Phone number
+        local number="$contact"
+        [[ "$number" != +* ]] && number="+$number"
+        python3 -c "
+import json
+with open('$EXCLUSIONS') as f:
+    d = json.load(f)
+im = d.get('imessage', [])
+if '$number' not in im:
+    im.append('$number')
+    d['imessage'] = im
+    with open('$EXCLUSIONS', 'w') as f:
+        json.dump(d, f, indent=2)
+    print('Added $number to iMessage exclusions')
+else:
+    print('$number already excluded')
+"
+    else
+        # Name → resolve via AddressBook
+        local results
+        results=$(python3 -c "
+import sqlite3, sys
+db_path = '$ABDB'
+try:
+    conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
+    c = conn.cursor()
+    c.execute('''
+        SELECT r.ZFIRSTNAME, r.ZLASTNAME, p.ZFULLNUMBER
+        FROM ZABCDRECORD r
+        JOIN ZABCDPHONENUMBER p ON r.Z_PK = p.ZOWNER
+        WHERE LOWER(r.ZFIRSTNAME) LIKE ? OR LOWER(r.ZLASTNAME) LIKE ?
+    ''', ('%${contact,,}%', '%${contact,,}%'))
+    rows = c.fetchall()
+    conn.close()
+    if not rows:
+        print('NO_MATCH')
+    else:
+        for i, (first, last, phone) in enumerate(rows):
+            name = f'{first or \"\"} {last or \"\"}'.strip()
+            print(f'{i+1}) {name}: {phone}')
+except Exception as e:
+    print(f'ERROR:{e}', file=sys.stderr)
+    print('NO_MATCH')
+" 2>/dev/null)
+
+        if [[ "$results" == "NO_MATCH" ]]; then
+            fail "no contact found matching '$contact'"
+            return 1
+        fi
+
+        echo "$results"
+        local count
+        count=$(echo "$results" | wc -l | tr -d ' ')
+        if [[ "$count" -eq 1 ]]; then
+            local phone
+            phone=$(echo "$results" | sed 's/.*: //')
+            # Normalize phone
+            phone=$(echo "$phone" | tr -d ' ()-')
+            cmd_exclude "$phone"
+        else
+            printf "Choose [1-$count]: "
+            read -r choice
+            local phone
+            phone=$(echo "$results" | sed -n "${choice}p" | sed 's/.*: //')
+            phone=$(echo "$phone" | tr -d ' ()-')
+            cmd_exclude "$phone"
+        fi
+        return
+    fi
+
+    # Regenerate cron job prompt with exclusions
+    _regenerate_digest_job
+}
+
+cmd_include() {
+    local contact="${1:?Usage: daybrief include <name|+number|@handle>}"
+    ensure_exclusions
+
+    if [[ "$contact" == @* ]]; then
+        python3 -c "
+import json
+with open('$EXCLUSIONS') as f:
+    d = json.load(f)
+tw = d.get('twitter', [])
+if '$contact' in tw:
+    tw.remove('$contact')
+    d['twitter'] = tw
+    with open('$EXCLUSIONS', 'w') as f:
+        json.dump(d, f, indent=2)
+    print('Removed $contact from Twitter exclusions')
+else:
+    print('$contact not in exclusion list')
+"
+        # Also update twitter-poller env
+        if [[ -f "$TWITTER_ENV" ]]; then
+            local handle="${contact#@}"
+            local current
+            current=$(grep "^DM_EXCLUDE_HANDLES=" "$TWITTER_ENV" 2>/dev/null | cut -d= -f2)
+            local updated
+            updated=$(echo "$current" | tr ',' '\n' | grep -v "^${handle}$" | paste -sd, -)
+            sed -i '' "s|^DM_EXCLUDE_HANDLES=.*|DM_EXCLUDE_HANDLES=${updated}|" "$TWITTER_ENV"
+            launchctl kickstart -k "gui/$(id -u)/${TWITTER_PLIST_LABEL}" 2>/dev/null || true
+        fi
+    elif [[ "$contact" == +* || "$contact" =~ ^[0-9]+$ ]]; then
+        local number="$contact"
+        [[ "$number" != +* ]] && number="+$number"
+        python3 -c "
+import json
+with open('$EXCLUSIONS') as f:
+    d = json.load(f)
+im = d.get('imessage', [])
+if '$number' in im:
+    im.remove('$number')
+    d['imessage'] = im
+    with open('$EXCLUSIONS', 'w') as f:
+        json.dump(d, f, indent=2)
+    print('Removed $number from iMessage exclusions')
+else:
+    print('$number not in exclusion list')
+"
+    else
+        # Name → resolve then include
+        fail "use phone number or @handle to include (e.g., daybrief include +15551234567)"
+        return 1
+    fi
+
+    _regenerate_digest_job
+}
+
+_regenerate_digest_job() {
+    local job_id
+    job_id=$(get_digest_job_id)
+    if [[ -z "$job_id" ]]; then
+        warn "no digest job found — exclusions saved but cron not updated"
+        return
+    fi
+
+    # Get current job's delivery config
+    local email
+    email=$(python3 -c "import json; print(json.load(open('$CONFIG')).get('channels',{}).get('email',{}).get('from_address',''))" 2>/dev/null || echo "")
+
+    # Remove old job and recreate with updated exclusions
+    "$NULLCLAW" cron remove "$job_id" 2>/dev/null || true
+
+    local prompt
+    prompt=$(digest_prompt)
+    "$NULLCLAW" cron add-agent "0 8 * * *" "$prompt" \
+        --name daily-digest \
+        --model claude-sonnet-4-20250514 \
+        --delivery-mode always \
+        --delivery-channel email \
+        --delivery-to "$email" 2>/dev/null && ok "digest job updated with exclusions" || warn "failed to update digest job"
+}
+
+# ── reauth-twitter ──────────────────────────────────────────────────
+cmd_reauth_twitter() {
+    info "clearing Twitter cookies..."
+    rm -f "$DATADIR/cookies.json"
+    ok "cookies removed"
+    info "restarting twitter poller..."
+    launchctl kickstart -k "gui/$(id -u)/${TWITTER_PLIST_LABEL}" 2>/dev/null && ok "poller restarted" || fail "failed to restart poller"
+}
+
+# ── remote ──────────────────────────────────────────────────────────
+cmd_remote() {
+    local subcmd="${1:-status}"
+    case "$subcmd" in
+        enable)
+            local auth_key="${2:?Usage: daybrief remote enable <tailscale-auth-key>}"
+
+            # Install Tailscale if needed
+            if ! command -v tailscale &>/dev/null; then
+                info "installing Tailscale..."
+                brew install tailscale 2>/dev/null && ok "Tailscale installed" || { fail "failed to install Tailscale"; return 1; }
+            fi
+
+            info "joining Tailscale network..."
+            sudo tailscale up --auth-key="$auth_key" 2>/dev/null && ok "joined network" || { fail "failed to join network"; return 1; }
+
+            info "enabling SSH..."
+            sudo tailscale set --ssh 2>/dev/null && ok "SSH enabled" || warn "failed to enable SSH"
+
+            echo ""
+            ok "remote access enabled. Ryan can now SSH in."
+            tailscale status 2>/dev/null || true
+            ;;
+        disable)
+            info "disabling SSH..."
+            sudo tailscale set --ssh=false 2>/dev/null || true
+            info "disconnecting..."
+            sudo tailscale down 2>/dev/null || true
+            ok "remote access disabled"
+            ;;
+        status|*)
+            if command -v tailscale &>/dev/null; then
+                tailscale status 2>/dev/null || fail "Tailscale not connected"
+            else
+                info "Tailscale not installed. Run: daybrief remote enable <key>"
+            fi
+            ;;
+    esac
+}
+
+# ── uninstall ───────────────────────────────────────────────────────
+cmd_uninstall() {
+    warn "this will stop daybrief services and remove LaunchAgents"
+    printf "Continue? [y/N] "
+    read -r confirm
+    [[ "$confirm" =~ ^[yY] ]] || { echo "Cancelled."; return; }
+
+    info "stopping services..."
+    brew services stop daybrief 2>/dev/null || true
+    launchctl unload "$TWITTER_PLIST" 2>/dev/null || true
+    rm -f "$TWITTER_PLIST"
+    ok "services stopped, plists removed"
+
+    if command -v tailscale &>/dev/null && tailscale status &>/dev/null; then
+        info "disconnecting Tailscale..."
+        sudo tailscale down 2>/dev/null || true
+    fi
+
+    echo ""
+    info "config preserved at $CONFIG"
+    info "data preserved at $DATADIR"
+    info "to fully remove: brew uninstall daybrief"
+}
+
+# ── Main dispatch ───────────────────────────────────────────────────
+cmd="${1:-help}"
+shift 2>/dev/null || true
+
+case "$cmd" in
+    setup)           cmd_setup ;;
+    status)          cmd_status ;;
+    doctor)          cmd_doctor ;;
+    logs)            cmd_logs "$@" ;;
+    config)          cmd_config "$@" ;;
+    test-digest)     cmd_test_digest ;;
+    exclude)         cmd_exclude "$@" ;;
+    include)         cmd_include "$@" ;;
+    reauth-twitter)  cmd_reauth_twitter ;;
+    remote)          cmd_remote "$@" ;;
+    uninstall)       cmd_uninstall ;;
+    version)         cmd_version ;;
+    help|--help|-h)  cmd_help ;;
+    *)
+        fail "unknown command: $cmd"
+        echo "Run 'daybrief help' for usage."
+        exit 1
+        ;;
+esac
