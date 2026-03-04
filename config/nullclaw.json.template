@@ -1,10 +1,15 @@
 {
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "anthropic/claude-sonnet-4-20250514"
+      }
+    }
+  },
   "models": {
-    "default": "claude-sonnet-4-20250514",
     "providers": {
       "anthropic": {
-        "api_key": "${ANTHROPIC_API_KEY}",
-        "default_model": "claude-sonnet-4-20250514"
+        "api_key": "${ANTHROPIC_API_KEY}"
       }
     }
   },
@@ -17,7 +22,7 @@
     "email": {
       "enabled": true,
       "smtp_host": "${SMTP_HOST}",
-      "smtp_port": 587,
+      "smtp_port": ${SMTP_PORT},
       "smtp_user": "${SMTP_USER}",
       "smtp_password": "${SMTP_PASSWORD}",
       "from_address": "${EMAIL_FROM}",
@@ -37,11 +42,5 @@
     "message_history": {
       "enabled": true
     }
-  },
-  "digest": {
-    "include_contacts": [],
-    "exclude_contacts": [],
-    "delivery_email": "${DIGEST_RECIPIENT_EMAIL}",
-    "schedule": "0 8 * * *"
   }
 }

@@ -225,22 +225,20 @@ cmd_setup() {
     echo "    4. Toggle it ON"
     echo ""
     echo "  Waiting for Full Disk Access..."
-    # Use nullclaw itself to test FDA — not the shell (which may already have FDA via Terminal)
+    echo "  (press Enter after granting access)"
+    # Can't reliably detect FDA from Terminal (Terminal itself may have FDA).
+    # Wait for explicit user confirmation.
     local chat_db="$HOME/Library/Messages/chat.db"
     while true; do
-        if "$NULLCLAW" agent -m "test" --max-turns 0 2>/dev/null; then
-            ok "Full Disk Access granted"
+        read -rp "  Have you added nullclaw to Full Disk Access? [y/n]: " fda_confirm
+        if [[ "$fda_confirm" =~ ^[yY] ]]; then
+            if [[ -r "$chat_db" ]]; then
+                ok "Full Disk Access looks good (chat.db readable)"
+            else
+                warn "chat.db not readable — make sure Full Disk Access is granted"
+            fi
             break
         fi
-        # Fallback: if nullclaw doesn't support --max-turns 0, check via sqlite3 spawned by nullclaw
-        if [[ -r "$chat_db" ]] && "$NULLCLAW" --version &>/dev/null; then
-            # Verify nullclaw can actually read the db (not just the shell)
-            if sqlite3 "$chat_db" "SELECT 1" &>/dev/null 2>&1; then
-                ok "Full Disk Access detected (verify nullclaw is in the list above)"
-                break
-            fi
-        fi
-        sleep 2
     done
 
     # ── Write configs ──
