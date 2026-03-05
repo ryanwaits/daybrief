@@ -219,7 +219,7 @@ import json, os
 config = {
     'agents': {'defaults': {'model': {'primary': 'anthropic/claude-sonnet-4-20250514'}}},
     'models': {'providers': {'anthropic': {'api_key': '$ANTHROPIC_API_KEY'}}},
-    'channels': {'imessage': {'enabled': True, 'allow_from': ['*'], 'poll_interval_secs': 3}},
+    'channels': {'imessage': {'enabled': True, 'allow_from': ['$ICLOUD_EMAIL'], 'poll_interval_secs': 3}},
     'memory': {'backend': 'sqlite', 'auto_save': True},
     'gateway': {'port': 3000, 'host': '127.0.0.1'},
     'tools': {'message_history': {'enabled': True}}
