@@ -234,7 +234,7 @@ config = {
     'channels': {'imessage': {'enabled': True, 'allow_from': allow_from, 'poll_interval_secs': 3}},
     'memory': {'backend': 'sqlite', 'auto_save': True},
     'gateway': {'port': 3000, 'host': '127.0.0.1'},
-    'tools': {'message_history': {'enabled': True}, 'shell': {'enabled': True}, 'file_read': {'enabled': True}, 'file_write': {'enabled': True}, 'file_edit': {'enabled': True}}
+    'tools': {'message_history': {'enabled': True}, 'shell': {'enabled': True, 'allowed_paths': ['*']}, 'file_read': {'enabled': True, 'allowed_paths': ['*']}, 'file_write': {'enabled': True, 'allowed_paths': ['*']}, 'file_edit': {'enabled': True, 'allowed_paths': ['*']}}
 }
 with open(os.path.expanduser('~/.nullclaw/config.json'), 'w') as f:
     json.dump(config, f, indent=2)
