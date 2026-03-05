@@ -200,7 +200,7 @@ cmd_setup() {
 
     # Auto-detect iCloud email
     local ICLOUD_EMAIL
-    ICLOUD_EMAIL=$(defaults read MobileMeAccounts Accounts 2>/dev/null | grep AccountID | head -1 | sed 's/.*= "//;s/".*//' || echo "")
+    ICLOUD_EMAIL=$(defaults read MobileMeAccounts Accounts 2>/dev/null | grep EmailAddress | head -1 | sed 's/.*= "//;s/".*//' || echo "")
     if [[ -z "$ICLOUD_EMAIL" ]]; then
         warn "could not auto-detect iCloud email"
         prompt_required ICLOUD_EMAIL "  Your iCloud email (for iMessage)"
