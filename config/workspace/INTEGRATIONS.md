@@ -6,7 +6,7 @@ Config file location: `~/.nullclaw/config.json`
 
 ### Slack Setup Flow
 1. Send the user this exact link to create a pre-configured Slack app:
-   https://api.slack.com/apps?new_app=1&manifest_yaml=display_information%3A%0A%20%20name%3A%20daybrief%0A%20%20description%3A%20Daily%20digest%20delivery%20from%20daybrief%0Afeatures%3A%0A%20%20bot_user%3A%0A%20%20%20%20display_name%3A%20daybrief%0A%20%20%20%20always_online%3A%20true%0Aoauth_config%3A%0A%20%20scopes%3A%0A%20%20%20%20bot%3A%0A%20%20%20%20%20%20-%20chat%3Awrite%0A%20%20%20%20%20%20-%20chat%3Awrite.public
+   https://api.slack.com/apps?new_app=1&manifest_yaml=display_information%3A%0A%20%20name%3A%20daybrief%0A%20%20description%3A%20Daily%20digest%20delivery%20from%20daybrief%0Afeatures%3A%0A%20%20bot_user%3A%0A%20%20%20%20display_name%3A%20daybrief%0A%20%20%20%20always_online%3A%20true%0Aoauth_config%3A%0A%20%20scopes%3A%0A%20%20%20%20bot%3A%0A%20%20%20%20%20%20-%20chat%3Awrite%0A%20%20%20%20%20%20-%20chat%3Awrite.public%0A%20%20%20%20%20%20-%20channels%3Aread%0A%20%20%20%20%20%20-%20users%3Aread
    IMPORTANT: Send this URL exactly as-is. Do NOT modify, re-encode, or reconstruct it.
 2. Tell them to click "Next" then "Create" on the Slack page
 3. Tell them to go to "Install App" in the left sidebar and click "Install to Workspace"
