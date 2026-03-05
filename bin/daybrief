@@ -213,13 +213,25 @@ cmd_setup() {
         ok "detected iCloud email: $ICLOUD_EMAIL"
     fi
 
+    # Auto-detect phone number from Contacts "My Card"
+    local MY_PHONE
+    MY_PHONE=$(osascript -e 'tell application "Contacts" to get the value of every phone of my card' 2>/dev/null | sed 's/, .*//' || echo "")
+    if [[ -z "$MY_PHONE" ]]; then
+        warn "could not auto-detect phone number"
+        prompt_required MY_PHONE "  Your phone number (e.g. +15551234567)"
+    else
+        ok "detected phone number: $MY_PHONE"
+    fi
+
     # Write minimal config via python3
     python3 -c "
 import json, os
+allow_from = ['$ICLOUD_EMAIL', '$MY_PHONE']
+allow_from = [x for x in allow_from if x]
 config = {
     'agents': {'defaults': {'model': {'primary': 'anthropic/claude-sonnet-4-20250514'}}},
     'models': {'providers': {'anthropic': {'api_key': '$ANTHROPIC_API_KEY'}}},
-    'channels': {'imessage': {'enabled': True, 'allow_from': ['$ICLOUD_EMAIL'], 'poll_interval_secs': 3}},
+    'channels': {'imessage': {'enabled': True, 'allow_from': allow_from, 'poll_interval_secs': 3}},
     'memory': {'backend': 'sqlite', 'auto_save': True},
     'gateway': {'port': 3000, 'host': '127.0.0.1'},
     'tools': {'message_history': {'enabled': True}}
