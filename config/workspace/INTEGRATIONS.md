@@ -1,11 +1,8 @@
 ## Integration Setup
 
-You can help users set up integrations conversationally. Available tools:
-- `setup_slack` — configure Slack delivery (needs bot_token + channel)
-- `setup_twitter` — configure Twitter DM polling (needs bearer_token)
-- `cron_update` — change digest delivery to Slack/email (delivery_mode, delivery_channel, delivery_to params)
-- `test_delivery` — send a test message to verify setup
-- `restart_service` — restart daybrief after config changes
+You can help users set up integrations conversationally using the `shell` and `file_edit` tools.
+
+Config file location: `~/.nullclaw/config.json`
 
 ### Slack Setup Flow
 1. Send the user this exact link to create a pre-configured Slack app:
@@ -15,12 +12,26 @@ You can help users set up integrations conversationally. Available tools:
 3. Tell them to go to "Install App" in the left sidebar and click "Install to Workspace"
 4. After installing, ask for the "Bot User OAuth Token" (starts with xoxb-)
 5. Ask which channel to deliver digests to (they can paste the channel name or ID)
-6. Use `setup_slack` tool with token + channel
-7. Use `test_delivery` to verify
-8. Use `cron_update` with delivery_mode=always, delivery_channel=slack, delivery_to=<channel_id>
-9. Use `restart_service` to apply changes
+6. Use `file_read` to read `~/.nullclaw/config.json`
+7. Use `file_edit` to add/update the slack channel in config:
+   ```json
+   "slack": [{"bot_token": "<TOKEN>", "channel_id": "<CHANNEL>", "mode": "http"}]
+   ```
+   Add this inside the `channels` object.
+8. Restart the service: `shell` with command `brew services restart daybrief`
+9. Test delivery: `shell` with command `curl -s -X POST "https://slack.com/api/chat.postMessage" -H "Authorization: Bearer <TOKEN>" -H "Content-Type: application/json" -d '{"channel":"<CHANNEL>","text":"daybrief test message"}'`
+10. To schedule the digest cron: `shell` with command from nullclaw cron, e.g.:
+    `/usr/local/Cellar/daybrief/0.2.2/libexec/nullclaw/nullclaw cron add-agent "0 8 * * *" "<prompt>" --name daily-digest --model claude-sonnet-4-20250514 --delivery-mode always --delivery-channel slack --delivery-to <CHANNEL>`
 
 ### Twitter Setup Flow
 1. Ask for X/Twitter API bearer token (from developer.twitter.com)
-2. Use `setup_twitter` tool with token
-3. Use `restart_service` to apply changes
+2. Use `file_read` + `file_edit` to add to config:
+   ```json
+   "twitter": [{"bearer_token": "<TOKEN>"}]
+   ```
+3. Restart: `shell` with `brew services restart daybrief`
+
+### Important Notes
+- Always use `file_read` to read the config before editing — never guess the structure
+- After any config change, restart with `brew services restart daybrief`
+- The nullclaw binary is at `/usr/local/Cellar/daybrief/0.2.2/libexec/nullclaw/nullclaw`
