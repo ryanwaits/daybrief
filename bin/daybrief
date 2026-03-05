@@ -103,7 +103,7 @@ ${BOLD}USAGE${NC}
     daybrief <command> [args]
 
 ${BOLD}COMMANDS${NC}
-    setup                  Configure daybrief (one-time wizard)
+    setup                  Configure daybrief (3-step wizard)
     status                 Show service health
     doctor                 Diagnose common issues
     logs                   Tail service logs
@@ -113,7 +113,6 @@ ${BOLD}COMMANDS${NC}
     exclude <contact>      Exclude a contact from digest
     include <contact>      Remove contact from exclusion list
     exclude --list         Show all excluded contacts
-    reauth-twitter         Re-authenticate Twitter API token
     remote enable <key>    Enable remote access via Tailscale
     remote disable         Disable remote access
     remote status          Show Tailscale status
@@ -140,8 +139,18 @@ cmd_setup() {
     ensure_datadir
     mkdir -p "$HOME/.nullclaw"
 
-    # ── 1/5 Anthropic API key ──
-    printf "${BOLD}1/5${NC}  Anthropic API key\n"
+    # ── Re-run guard ──
+    if [[ -f "$CONFIG" ]]; then
+        warn "config already exists at $CONFIG"
+        info "re-running setup will overwrite it (channels configured via iMessage will be lost)"
+        printf "  Continue? [y/N]: "
+        read -r overwrite_confirm
+        [[ "$overwrite_confirm" =~ ^[yY] ]] || { echo "Cancelled."; return; }
+        echo ""
+    fi
+
+    # ── 1/3 Anthropic API key ──
+    printf "${BOLD}1/3${NC}  Anthropic API key\n"
     prompt_secret ANTHROPIC_API_KEY "  API key (sk-ant-...)"
     printf "  Validating... "
     local http_code
@@ -155,180 +164,9 @@ cmd_setup() {
         warn "API returned HTTP $http_code (may still work)"
     fi
 
-    # ── 2/5 Digest delivery ──
+    # ── 2/3 Full Disk Access ──
     echo ""
-    printf "${BOLD}2/5${NC}  Digest delivery\n"
-    echo "    1) Email"
-    echo "    2) Slack"
-    printf "  Choice [1]: "
-    read -r delivery_choice
-    delivery_choice="${delivery_choice:-1}"
-
-    local DELIVERY_CHANNEL="email"
-    local DELIVERY_TO=""
-    local SLACK_BOT_TOKEN=""
-    local SLACK_CHANNEL_ID=""
-    local smtp_host="" smtp_port="" EMAIL="" APP_PASSWORD=""
-
-    case "$delivery_choice" in
-        2)
-            DELIVERY_CHANNEL="slack"
-            echo ""
-            info "Create a Slack app at https://api.slack.com/apps"
-            info "Required scopes: chat:write"
-            info "Install to workspace, then paste the bot token below."
-            echo ""
-            prompt_secret SLACK_BOT_TOKEN "  Bot token (xoxb-...)"
-
-            # Validate token
-            printf "  Validating... "
-            local slack_resp
-            slack_resp=$(curl -s "https://slack.com/api/auth.test" \
-                -H "Authorization: Bearer $SLACK_BOT_TOKEN" 2>/dev/null || echo '{"ok":false}')
-            if echo "$slack_resp" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get('ok') else 1)" 2>/dev/null; then
-                ok "Slack token valid"
-            else
-                warn "Slack token validation failed (setup will continue)"
-            fi
-
-            prompt_required SLACK_CHANNEL_ID "  Channel ID (C...)"
-            DELIVERY_TO="$SLACK_CHANNEL_ID"
-            ;;
-        *)
-            DELIVERY_CHANNEL="email"
-            echo ""
-            echo "  Which email provider?"
-            echo "    1) Gmail"
-            echo "    2) iCloud"
-            echo "    3) Outlook"
-            echo "    4) Other"
-            printf "  Choice [1]: "
-            read -r provider_choice
-            provider_choice="${provider_choice:-1}"
-
-            local app_pw_url
-            case "$provider_choice" in
-                1) smtp_host="smtp.gmail.com"; smtp_port="587"; app_pw_url="https://myaccount.google.com/apppasswords" ;;
-                2) smtp_host="smtp.mail.me.com"; smtp_port="587"; app_pw_url="https://appleid.apple.com/account/manage" ;;
-                3) smtp_host="smtp.office365.com"; smtp_port="587"; app_pw_url="" ;;
-                4)
-                    prompt_required smtp_host "  SMTP host"
-                    prompt_required smtp_port "  SMTP port"
-                    app_pw_url=""
-                    ;;
-                *) smtp_host="smtp.gmail.com"; smtp_port="587"; app_pw_url="https://myaccount.google.com/apppasswords" ;;
-            esac
-
-            prompt_required EMAIL "  Email address"
-
-            if [[ -n "$app_pw_url" ]]; then
-                echo ""
-                info "You need an app password (not your regular password)."
-                info "Steps:"
-                echo "    1. Go to $app_pw_url"
-                echo "    2. Create a new app password for 'daybrief'"
-                echo "    3. Paste it below"
-                echo ""
-                open "$app_pw_url" 2>/dev/null || true
-            fi
-
-            prompt_secret APP_PASSWORD "  App password"
-
-            # Test email
-            printf "  Sending test email... "
-            if echo "Subject: daybrief test\nFrom: $EMAIL\nTo: $EMAIL\n\nThis is a test email from daybrief setup." | \
-                curl -s --url "smtp://${smtp_host}:${smtp_port}" \
-                --ssl-reqd \
-                --mail-from "$EMAIL" \
-                --mail-rcpt "$EMAIL" \
-                --user "${EMAIL}:${APP_PASSWORD}" \
-                -T - 2>/dev/null; then
-                ok "test email sent to $EMAIL"
-            else
-                warn "test email failed — check credentials (setup will continue)"
-            fi
-
-            DELIVERY_TO="$EMAIL"
-            ;;
-    esac
-
-    # ── 3/5 Twitter DMs (optional) ──
-    echo ""
-    printf "${BOLD}3/5${NC}  Twitter DMs (optional — press Enter to skip)\n"
-    echo "    1) API Key (paste bearer token)"
-    echo "    2) Connect with X (coming soon)"
-    echo "    3) Skip"
-    printf "  Choice [3]: "
-    read -r twitter_choice
-    twitter_choice="${twitter_choice:-3}"
-
-    local TWITTER_BEARER_TOKEN=""
-
-    case "$twitter_choice" in
-        1)
-            echo ""
-            info "Get a bearer token from https://developer.x.com/en/portal/dashboard"
-            echo ""
-            if [[ -n "${DAYBRIEF_TEST_TWITTER_TOKEN:-}" ]]; then
-                info "DAYBRIEF_TEST_TWITTER_TOKEN detected — enter 'test' to use it."
-            fi
-            prompt_secret TWITTER_BEARER_TOKEN "  Bearer token"
-            if [[ "$TWITTER_BEARER_TOKEN" == "test" && -n "${DAYBRIEF_TEST_TWITTER_TOKEN:-}" ]]; then
-                TWITTER_BEARER_TOKEN="$DAYBRIEF_TEST_TWITTER_TOKEN"
-                ok "using test token from env"
-            fi
-            ;;
-        2)
-            if [[ -n "${DAYBRIEF_X_CLIENT_ID:-}" ]]; then
-                echo ""
-                info "Starting OAuth flow..."
-                # Check gateway is running
-                if ! curl -s -o /dev/null "http://localhost:3000/health" 2>/dev/null; then
-                    fail "gateway not running — start it first: brew services start daybrief"
-                    info "Skipping Twitter for now. Re-run setup after starting gateway."
-                else
-                    # Generate PKCE verifier
-                    local pkce_verifier
-                    pkce_verifier=$(openssl rand -base64 48 | tr '+/' '-_' | tr -d '=')
-                    local pkce_challenge
-                    pkce_challenge=$(printf '%s' "$pkce_verifier" | openssl dgst -sha256 -binary | openssl base64 | tr '+/' '-_' | tr -d '=')
-                    local oauth_state
-                    oauth_state=$(openssl rand -hex 16)
-
-                    local authorize_url="https://twitter.com/i/oauth2/authorize?response_type=code&client_id=${DAYBRIEF_X_CLIENT_ID}&redirect_uri=http://127.0.0.1:3000/oauth/twitter/callback&scope=dm.read%20offline.access&state=${oauth_state}&code_challenge=${pkce_challenge}&code_challenge_method=S256"
-
-                    info "Opening browser to authorize..."
-                    open "$authorize_url" 2>/dev/null || echo "  Open: $authorize_url"
-
-                    # Poll for auth.json entry
-                    info "Waiting for authorization (timeout: 120s)..."
-                    local waited=0
-                    while [[ $waited -lt 120 ]]; do
-                        if [[ -f "$HOME/.nullclaw/auth.json" ]] && python3 -c "import json; d=json.load(open('$HOME/.nullclaw/auth.json')); assert 'twitter' in d" 2>/dev/null; then
-                            ok "Twitter authorized via OAuth"
-                            break
-                        fi
-                        sleep 2
-                        waited=$((waited + 2))
-                    done
-                    if [[ $waited -ge 120 ]]; then
-                        warn "OAuth timed out — run 'daybrief reauth-twitter' to try again"
-                    fi
-                fi
-            else
-                echo ""
-                info "Coming soon! Once the daybrief X app is registered, this will"
-                info "open your browser to authorize access. For now, use API Key mode."
-            fi
-            ;;
-        3|*)
-            info "Skipping Twitter"
-            ;;
-    esac
-
-    # ── 4/5 Full Disk Access ──
-    echo ""
-    printf "${BOLD}4/5${NC}  Full Disk Access\n"
+    printf "${BOLD}2/3${NC}  Full Disk Access\n"
     info "daybrief needs Full Disk Access to read iMessage."
     echo ""
     info "Opening System Settings → Full Disk Access..."
@@ -356,21 +194,34 @@ cmd_setup() {
         fi
     done
 
-    # ── 5/5 Write configs ──
+    # ── 3/3 Write config + start ──
     echo ""
-    printf "${BOLD}5/5${NC}  Writing configuration...\n"
+    printf "${BOLD}3/3${NC}  Writing configuration...\n"
 
-    # nullclaw config
-    sed -e "s|\${ANTHROPIC_API_KEY}|${ANTHROPIC_API_KEY}|g" \
-        -e "s|\${SMTP_HOST}|${smtp_host}|g" \
-        -e "s|\${SMTP_PORT}|${smtp_port:-587}|g" \
-        -e "s|\${SMTP_USER}|${EMAIL}|g" \
-        -e "s|\${SMTP_PASSWORD}|${APP_PASSWORD}|g" \
-        -e "s|\${EMAIL_FROM}|${EMAIL}|g" \
-        -e "s|\${SLACK_BOT_TOKEN}|${SLACK_BOT_TOKEN}|g" \
-        -e "s|\${SLACK_CHANNEL_ID}|${SLACK_CHANNEL_ID}|g" \
-        -e "s|\${TWITTER_BEARER_TOKEN}|${TWITTER_BEARER_TOKEN}|g" \
-        "$TEMPLATE" > "$CONFIG"
+    # Auto-detect iCloud email
+    local ICLOUD_EMAIL
+    ICLOUD_EMAIL=$(defaults read MobileMeAccounts Accounts 2>/dev/null | grep AccountID | head -1 | sed 's/.*= "//;s/".*//' || echo "")
+    if [[ -z "$ICLOUD_EMAIL" ]]; then
+        warn "could not auto-detect iCloud email"
+        prompt_required ICLOUD_EMAIL "  Your iCloud email (for iMessage)"
+    else
+        ok "detected iCloud email: $ICLOUD_EMAIL"
+    fi
+
+    # Write minimal config via python3
+    python3 -c "
+import json, os
+config = {
+    'agents': {'defaults': {'model': {'primary': 'anthropic/claude-sonnet-4-20250514'}}},
+    'models': {'providers': {'anthropic': {'api_key': '$ANTHROPIC_API_KEY'}}},
+    'channels': {'imessage': [{'enabled': True, 'allow_from': ['*'], 'poll_interval_secs': 3}]},
+    'memory': {'backend': 'sqlite', 'auto_save': True},
+    'gateway': {'port': 3000, 'host': '127.0.0.1'},
+    'tools': {'message_history': {'enabled': True}}
+}
+with open(os.path.expanduser('~/.nullclaw/config.json'), 'w') as f:
+    json.dump(config, f, indent=2)
+"
     ok "wrote $CONFIG"
 
     # Copy workspace files
@@ -380,27 +231,18 @@ cmd_setup() {
         ok "copied INTEGRATIONS.md to workspace"
     fi
 
-    # ── Create digest cron job ──
-    local digest_format="html"
-    [[ "$DELIVERY_CHANNEL" == "slack" ]] && digest_format="slack"
-
-    local prompt
-    prompt=$(digest_prompt "$digest_format")
-    "$NULLCLAW" cron add-agent "0 8 * * *" "$prompt" \
-        --name daily-digest \
-        --model claude-sonnet-4-20250514 \
-        --delivery-mode always \
-        --delivery-channel "$DELIVERY_CHANNEL" \
-        --delivery-to "$DELIVERY_TO" 2>/dev/null && ok "daily digest scheduled for 8am" || warn "cron job creation failed — run 'daybrief doctor'"
+    # Start service
+    echo ""
+    info "starting daybrief..."
+    brew services start daybrief 2>/dev/null && ok "service started" || warn "failed to start — run: brew services start daybrief"
 
     echo ""
-    ok "Setup complete! Digest scheduled for 8am."
+    ok "Setup complete!"
     echo ""
-    echo "  Next step — start the gateway:"
-    echo "    brew services start daybrief"
-    echo ""
-    echo "  First digest arrives tomorrow. To test now:"
-    echo "    daybrief test-digest"
+    echo "  You're live! To set up Slack, Twitter, or your daily digest:"
+    echo "    1. Open Messages on your iPhone"
+    echo "    2. Start a new conversation to: ${ICLOUD_EMAIL}"
+    echo "    3. Send: \"help me set up Slack for my daily digest\""
 }
 
 # ── status ──────────────────────────────────────────────────────────
@@ -417,19 +259,26 @@ cmd_status() {
     fi
 
     # Delivery channel
+    local has_slack="" has_email=""
     if [[ -f "$CONFIG" ]]; then
         local slack_token
         slack_token=$(python3 -c "import json; c=json.load(open('$CONFIG')).get('channels',{}); s=c.get('slack',[]); print(s[0].get('bot_token','') if s else '')" 2>/dev/null || echo "")
         if [[ -n "$slack_token" && "$slack_token" != '${SLACK_BOT_TOKEN}' ]]; then
+            has_slack=1
             local slack_ch
             slack_ch=$(python3 -c "import json; c=json.load(open('$CONFIG')).get('channels',{}); s=c.get('slack',[]); print(s[0].get('channel_id','') if s else '')" 2>/dev/null || echo "")
             ok "slack delivery configured (channel $slack_ch)"
-        else
-            local email_from
-            email_from=$(python3 -c "import json; print(json.load(open('$CONFIG')).get('channels',{}).get('email',{}).get('from_address',''))" 2>/dev/null || echo "")
-            if [[ -n "$email_from" && "$email_from" != '${EMAIL_FROM}' ]]; then
-                ok "email delivery configured ($email_from)"
-            fi
+        fi
+
+        local email_from
+        email_from=$(python3 -c "import json; print(json.load(open('$CONFIG')).get('channels',{}).get('email',{}).get('from_address',''))" 2>/dev/null || echo "")
+        if [[ -n "$email_from" && "$email_from" != '${EMAIL_FROM}' ]]; then
+            has_email=1
+            ok "email delivery configured ($email_from)"
+        fi
+
+        if [[ -z "$has_slack" && -z "$has_email" ]]; then
+            info "delivery      not configured yet (set up via iMessage)"
         fi
     fi
 
@@ -441,8 +290,6 @@ cmd_status() {
             ok "twitter        API key configured"
         elif [[ -f "$HOME/.nullclaw/auth.json" ]] && python3 -c "import json; d=json.load(open('$HOME/.nullclaw/auth.json')); assert 'twitter' in d" 2>/dev/null; then
             ok "twitter        OAuth configured"
-        else
-            warn "twitter        not configured"
         fi
     fi
 
@@ -452,7 +299,7 @@ cmd_status() {
     if [[ -n "$job_id" ]]; then
         ok "digest cron    scheduled (job $job_id)"
     else
-        fail "digest cron    not found"
+        info "digest cron    not yet scheduled"
     fi
 
     # Gateway endpoint
@@ -530,17 +377,16 @@ cmd_doctor() {
         fi
     fi
 
-    # 5. SMTP
+    # 5. SMTP (only if email channel configured)
     if [[ -f "$CONFIG" ]]; then
         local smtp_host
         smtp_host=$(python3 -c "import json; print(json.load(open('$CONFIG')).get('channels',{}).get('email',{}).get('smtp_host',''))" 2>/dev/null || echo "")
-        local smtp_port
-        smtp_port=$(python3 -c "import json; print(json.load(open('$CONFIG')).get('channels',{}).get('email',{}).get('smtp_port',587))" 2>/dev/null || echo "587")
         if [[ -n "$smtp_host" && "$smtp_host" != '${SMTP_HOST}' ]]; then
+            local smtp_port
+            smtp_port=$(python3 -c "import json; print(json.load(open('$CONFIG')).get('channels',{}).get('email',{}).get('smtp_port',587))" 2>/dev/null || echo "587")
             if openssl s_client -connect "${smtp_host}:${smtp_port}" -starttls smtp </dev/null 2>/dev/null | grep -q "Verify return code: 0"; then
                 ok "SMTP reachable ($smtp_host:$smtp_port)"
             else
-                # Try without starttls verification (still connectable)
                 if timeout 5 bash -c "echo Q | openssl s_client -connect ${smtp_host}:${smtp_port} -starttls smtp 2>/dev/null" | grep -q "CONNECTED"; then
                     ok "SMTP connectable ($smtp_host:$smtp_port)"
                 else
@@ -548,9 +394,6 @@ cmd_doctor() {
                     ((issues++)) || true
                 fi
             fi
-        else
-            fail "SMTP not configured — run: daybrief setup"
-            ((issues++)) || true
         fi
     fi
 
@@ -643,7 +486,7 @@ cmd_test_digest() {
     local job_id
     job_id=$(get_digest_job_id)
     if [[ -z "$job_id" ]]; then
-        fail "no digest cron job found — run: daybrief setup"
+        fail "no digest job found — ask your agent to create one via iMessage"
         return 1
     fi
     info "triggering digest now (job $job_id)..."
@@ -826,15 +669,19 @@ _regenerate_digest_job() {
     fi
 
     # Detect delivery channel from config
-    local delivery_channel="email"
-    local delivery_to=""
+    local delivery_channel="" delivery_to=""
     local slack_token
     slack_token=$(python3 -c "import json; c=json.load(open('$CONFIG')).get('channels',{}); s=c.get('slack',[]); print(s[0].get('bot_token','') if s else '')" 2>/dev/null || echo "")
     if [[ -n "$slack_token" && "$slack_token" != '${SLACK_BOT_TOKEN}' ]]; then
         delivery_channel="slack"
         delivery_to=$(python3 -c "import json; c=json.load(open('$CONFIG')).get('channels',{}); s=c.get('slack',[]); print(s[0].get('channel_id','') if s else '')" 2>/dev/null || echo "")
     else
-        delivery_to=$(python3 -c "import json; print(json.load(open('$CONFIG')).get('channels',{}).get('email',{}).get('from_address',''))" 2>/dev/null || echo "")
+        local email_from
+        email_from=$(python3 -c "import json; print(json.load(open('$CONFIG')).get('channels',{}).get('email',{}).get('from_address',''))" 2>/dev/null || echo "")
+        if [[ -n "$email_from" && "$email_from" != '${EMAIL_FROM}' ]]; then
+            delivery_channel="email"
+            delivery_to="$email_from"
+        fi
     fi
 
     # Remove old job and recreate with updated exclusions
@@ -845,52 +692,17 @@ _regenerate_digest_job() {
 
     local prompt
     prompt=$(digest_prompt "$digest_format")
+
+    # Build delivery params only if a channel is configured
+    local delivery_args=()
+    if [[ -n "$delivery_channel" ]]; then
+        delivery_args=(--delivery-mode always --delivery-channel "$delivery_channel" --delivery-to "$delivery_to")
+    fi
+
     "$NULLCLAW" cron add-agent "0 8 * * *" "$prompt" \
         --name daily-digest \
         --model claude-sonnet-4-20250514 \
-        --delivery-mode always \
-        --delivery-channel "$delivery_channel" \
-        --delivery-to "$delivery_to" 2>/dev/null && ok "digest job updated with exclusions" || warn "failed to update digest job"
-}
-
-# ── reauth-twitter ──────────────────────────────────────────────────
-cmd_reauth_twitter() {
-    # Detect current mode
-    local tw_bearer=""
-    if [[ -f "$CONFIG" ]]; then
-        tw_bearer=$(python3 -c "import json; c=json.load(open('$CONFIG')).get('channels',{}); t=c.get('twitter',[]); print(t[0].get('bearer_token','') if t else '')" 2>/dev/null || echo "")
-    fi
-
-    if [[ -n "$tw_bearer" && "$tw_bearer" != '${TWITTER_BEARER_TOKEN}' ]]; then
-        info "Current mode: API Key"
-        echo "  Enter new bearer token (or press Enter to keep current):"
-        local new_token
-        read -rs new_token
-        echo ""
-        if [[ -n "$new_token" ]]; then
-            # Update config in-place
-            python3 -c "
-import json
-with open('$CONFIG') as f: c = json.load(f)
-c['channels']['twitter'][0]['bearer_token'] = '$new_token'
-with open('$CONFIG', 'w') as f: json.dump(c, f, indent=2)
-" 2>/dev/null && ok "bearer token updated" || fail "failed to update token"
-        else
-            info "keeping current token"
-        fi
-    elif [[ -f "$HOME/.nullclaw/auth.json" ]] && python3 -c "import json; d=json.load(open('$HOME/.nullclaw/auth.json')); assert 'twitter' in d" 2>/dev/null; then
-        info "Current mode: OAuth"
-        info "Removing saved credential..."
-        python3 -c "
-import json
-with open('$HOME/.nullclaw/auth.json') as f: d = json.load(f)
-d.pop('twitter', None)
-with open('$HOME/.nullclaw/auth.json', 'w') as f: json.dump(d, f, indent=2)
-" 2>/dev/null && ok "OAuth token removed" || fail "failed to remove token"
-        info "Re-run 'daybrief setup' to re-authorize."
-    else
-        fail "Twitter not configured — run 'daybrief setup'"
-    fi
+        "${delivery_args[@]}" 2>/dev/null && ok "digest job updated with exclusions" || warn "failed to update digest job"
 }
 
 # ── remote ──────────────────────────────────────────────────────────
@@ -968,7 +780,6 @@ case "$cmd" in
     test-digest)     cmd_test_digest ;;
     exclude)         cmd_exclude "$@" ;;
     include)         cmd_include "$@" ;;
-    reauth-twitter)  cmd_reauth_twitter ;;
     remote)          cmd_remote "$@" ;;
     uninstall)       cmd_uninstall ;;
     version)         cmd_version ;;
