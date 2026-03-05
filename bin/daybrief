@@ -194,6 +194,11 @@ cmd_setup() {
         fi
     done
 
+    # Trigger Messages automation permission prompt
+    echo ""
+    info "Requesting Messages automation access..."
+    osascript -e 'tell application "Messages" to get the name of the first service' &>/dev/null &&         ok "Messages automation approved" ||         warn "Messages automation denied — nullclaw won't be able to send iMessages"
+
     # ── 3/3 Write config + start ──
     echo ""
     printf "${BOLD}3/3${NC}  Writing configuration...\n"
